@@ -39,6 +39,11 @@ DEV = os.environ.get('SPYDER_DEV')
 TEST = os.environ.get('SPYDER_TEST')
 
 
+# To do some adjustments for pytest
+# This env var is defined in runtests.py
+PYTEST = os.environ.get('SPYDER_PYTEST')
+
+
 #==============================================================================
 # Debug helpers
 #==============================================================================
@@ -113,9 +118,16 @@ def get_home_dir():
 
 def get_conf_path(filename=None):
     """Return absolute path for configuration file with specified filename"""
-    # This makes us follow the XDG standard to save our settings
-    # on Linux, as it was requested on Issue 2629
-    if sys.platform.startswith('linux'):
+    # Define conf_dir
+    if PYTEST:
+        import py
+        from _pytest.tmpdir import get_user
+        conf_dir = osp.join(str(py.path.local.get_temproot()),
+                            'pytest-of-{}'.format(get_user()),
+                            SUBFOLDER)
+    elif sys.platform.startswith('linux'):
+        # This makes us follow the XDG standard to save our settings
+        # on Linux, as it was requested on Issue 2629
         xdg_config_home = os.environ.get('XDG_CONFIG_HOME', '')
         if not xdg_config_home:
             xdg_config_home = osp.join(get_home_dir(), '.config')
@@ -124,8 +136,13 @@ def get_conf_path(filename=None):
         conf_dir = osp.join(xdg_config_home, SUBFOLDER)
     else:
         conf_dir = osp.join(get_home_dir(), SUBFOLDER)
+
+    # Create conf_dir
     if not osp.isdir(conf_dir):
-        os.mkdir(conf_dir)
+        if PYTEST:
+            os.makedirs(conf_dir)
+        else:
+            os.mkdir(conf_dir)
     if filename is None:
         return conf_dir
     else:
@@ -184,9 +201,6 @@ def is_py2exe_or_cx_Freeze():
     return osp.isfile(osp.join(get_module_path('spyder'), osp.pardir))
 
 
-SCIENTIFIC_STARTUP = get_module_source_path('spyder', 'scientific_startup.py')
-
-
 #==============================================================================
 # Image path list
 #==============================================================================
@@ -209,6 +223,7 @@ def get_image_path(name, default="not_found.png"):
         if osp.isfile(full_path):
             return osp.abspath(full_path)
     if default is not None:
+        img_path = osp.join(get_module_path('spyder'), 'images')
         return osp.abspath(osp.join(img_path, default))
 
 
@@ -225,9 +240,13 @@ LANGUAGE_CODES = {'en': u'English',
                   'es': u'Español',
                   'pt_BR': u'Português',
                   'ru': u'Русский',
-                  'ja': u'日本語'
+                  'zh_CN': u'简体中文',
+                  'ja': u'日本語',
+                  'de': u'Deutsch'
                   }
 
+# Disabled languages (because their translations are outdated)
+DISABLED_LANGUAGES = []
 
 def get_available_translations():
     """
@@ -241,6 +260,9 @@ def get_available_translations():
     listdir = os.listdir(locale_path)
     langs = [d for d in listdir if osp.isdir(osp.join(locale_path, d))]
     langs = [DEFAULT_LANGUAGE] + langs
+
+    # Remove disabled languages
+    langs = list( set(langs) - set(DISABLED_LANGUAGES) )
 
     # Check that there is a language code available in case a new translation
     # is added, to ensure LANGUAGE_CODES is updated.
@@ -265,7 +287,16 @@ def get_interface_language():
     2.) Spyder provides ('en',  'fr', 'es' and 'pt_BR'), if the locale is
     either 'pt' or 'pt_BR', this function will return 'pt_BR'
     """
-    locale_language = locale.getdefaultlocale()[0]
+
+    # Solves issue #3627
+    try:
+        locale_language = locale.getdefaultlocale()[0]
+    except ValueError:
+        locale_language = DEFAULT_LANGUAGE
+
+    # Tests expect English as the interface language
+    if PYTEST:
+        locale_language = DEFAULT_LANGUAGE
 
     language = DEFAULT_LANGUAGE
 
@@ -301,6 +332,12 @@ def load_lang_conf():
     else:
         lang = get_interface_language()
         save_lang_conf(lang)
+
+    # Save language again if it's been disabled
+    if lang.strip('\n') in DISABLED_LANGUAGES:
+        lang = DEFAULT_LANGUAGE
+        save_lang_conf(lang)
+
     return lang
 
 
@@ -332,7 +369,7 @@ def get_translation(modname, dirname=None):
                 return to_text_string(y, "utf-8")
         return translate_gettext
     except IOError as _e:  # analysis:ignore
-        #print "Not using translations (%s)" % _e
+        # Not using translations
         def translate_dumb(x):
             if not is_unicode(x):
                 return to_text_string(x, "utf-8")
@@ -353,30 +390,29 @@ def get_supported_types():
     dict(picklable=picklable_types, editable=editables_types)
          
     See:
-    get_remote_data function in spyder/widgets/externalshell/monitor.py
-    get_internal_shell_filter method in namespacebrowser.py
+    get_remote_data function in spyder/widgets/variableexplorer/utils/monitor.py
     
     Note:
     If you update this list, don't forget to update doc/variablexplorer.rst
     """
-    from datetime import date
-    editable_types = [int, float, complex, list, dict, tuple, date
-                      ] + list(TEXT_TYPES) + list(INT_TYPES)
+    from datetime import date, timedelta
+    editable_types = [int, float, complex, list, set, dict, tuple, date,
+                      timedelta] + list(TEXT_TYPES) + list(INT_TYPES)
     try:
         from numpy import ndarray, matrix, generic
         editable_types += [ndarray, matrix, generic]
-    except ImportError:
+    except:
         pass
     try:
-        from pandas import DataFrame, Series
-        editable_types += [DataFrame, Series]
-    except ImportError:
+        from pandas import DataFrame, Series, Index
+        editable_types += [DataFrame, Series, Index]
+    except:
         pass
     picklable_types = editable_types[:]
     try:
         from spyder.pil_patch import Image
         editable_types.append(Image.Image)
-    except ImportError:
+    except:
         pass
     return dict(picklable=picklable_types, editable=editable_types)
 
@@ -412,7 +448,7 @@ def running_in_mac_app():
 SAVED_CONFIG_FILES = ('help', 'onlinehelp', 'path', 'pylint.results',
                       'spyder.ini', 'temp.py', 'temp.spydata', 'template.py',
                       'history.py', 'history_internal.py', 'workingdir',
-                      '.projects', '.spyderproject', '.ropeproject',
+                      '.projects', '.spyproject', '.ropeproject',
                       'monitor.log', 'monitor_debug.log', 'rope.log',
                       'langconfig', 'spyder.lock')
 

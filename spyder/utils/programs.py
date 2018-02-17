@@ -9,6 +9,7 @@
 from __future__ import print_function
 
 from distutils.version import LooseVersion
+from getpass import getuser
 import imp
 import inspect
 import os
@@ -20,7 +21,8 @@ import tempfile
 
 # Local imports
 from spyder.utils import encoding
-from spyder.py3compat import PY2, is_text_string
+from spyder.utils.misc import get_python_executable
+from spyder.py3compat import PY2, is_text_string, to_text_string
 
 
 class ProgramError(Exception):
@@ -30,7 +32,7 @@ class ProgramError(Exception):
 if os.name == 'nt':
     TEMPDIR = tempfile.gettempdir() + osp.sep + 'spyder'
 else:
-    username = encoding.to_unicode_from_fs(os.environ.get('USER'))
+    username = encoding.to_unicode_from_fs(getuser())
     TEMPDIR = tempfile.gettempdir() + osp.sep + 'spyder-' + username
 
 
@@ -257,7 +259,6 @@ def run_python_script_in_terminal(fname, wdir, args, interact,
 
     :str wdir: working directory, may be empty.
     """
-    
     # If fname has spaces on it it can't be ran on Windows, so we have to
     # enclose it in quotes. Also wdir can come with / as os.sep, so we
     # need to take care of it
@@ -265,7 +266,7 @@ def run_python_script_in_terminal(fname, wdir, args, interact,
         fname = '"' + fname + '"'
         wdir = wdir.replace('/', '\\')
     
-    p_args = ['python']
+    p_args = [get_python_executable()]
     p_args += get_python_args(fname, python_args, interact, debug, args)
     
     if os.name == 'nt':
@@ -327,7 +328,7 @@ def is_stable_version(version):
         version = version.split('.')
     last_part = version[-1]
 
-    if not re.search('[a-zA-Z]', last_part):
+    if not re.search(r'[a-zA-Z]', last_part):
         return True
     else:
         return False
@@ -396,9 +397,6 @@ def is_module_installed(module_name, version=None, installed_version=None,
     in a determined interpreter
     """
     if interpreter:
-        if not osp.isdir(TEMPDIR):
-            os.mkdir(TEMPDIR)
-        
         if osp.isfile(interpreter) and ('python' in interpreter):
             checkver = inspect.getsource(check_version)
             get_modver = inspect.getsource(get_module_version)
@@ -436,7 +434,7 @@ def is_module_installed(module_name, version=None, installed_version=None,
         if installed_version is None:
             try:
                 actver = get_module_version(module_name)
-            except ImportError:
+            except:
                 # Module is not installed
                 return False
         else:
@@ -451,7 +449,7 @@ def is_module_installed(module_name, version=None, installed_version=None,
                 for ver in version.split(';'):
                     output = output and is_module_installed(module_name, ver)
                 return output
-            match = re.search('[0-9]', version)
+            match = re.search(r'[0-9]', version)
             assert match is not None, "Invalid version number"
             symb = version[:match.start()]
             if not symb:
@@ -462,19 +460,28 @@ def is_module_installed(module_name, version=None, installed_version=None,
             
             return check_version(actver, version, symb)
 
+def is_python_interpreter_valid_name(filename):
+    """Check that the python interpreter file has a valid name."""
+    pattern = r'.*python(\d\.?\d*)?(w)?(.exe)?$'
+    if re.match(pattern, filename, flags=re.I) is None:
+        return False
+    else:
+        return True
 
-def test_programs():
-    assert find_program('git')
-    assert shell_split('-q -o -a') == ['-q', '-o', '-a']
-    assert shell_split('-q "d:\\Python de xxxx\\t.txt" -o -a') == \
-           ['-q', 'd:\\Python de xxxx\\t.txt', '-o', '-a']
-    assert check_version('0.9.4-1', '0.9.4', '>=')
-    assert check_version('3.0.0rc1', '3.0.0', '<')
-    assert check_version('1.0', '1.0b2', '>')
-    assert is_module_installed('qtconsole', '>=4.0')
-    assert not is_module_installed('IPython', '>=1.0;<3.0')
-    assert is_module_installed('jedi', '>=0.7.0')
-
-
-if __name__ == '__main__':
-    test_programs()
+def is_python_interpreter(filename):
+    """Evaluate wether a file is a python interpreter or not."""
+    real_filename = os.path.realpath(filename)  # To follow symlink if existent
+    if (not osp.isfile(real_filename) or encoding.is_text_file(real_filename)
+        or not is_python_interpreter_valid_name(filename)):
+        return False
+    try:
+        proc = run_program(filename, ["-h"])
+        output = to_text_string(proc.communicate()[0])
+        valid = ("Options and arguments (and corresponding environment "
+                 "variables)")
+        if 'usage:' in output and valid in output:
+            return True
+        else:
+            return False
+    except:
+        return False

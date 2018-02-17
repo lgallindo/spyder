@@ -13,13 +13,13 @@
 
 # Standard library imports
 from __future__ import print_function, with_statement
-import os
 import os.path as osp
 import re
 import sys
 import time
 
 # Third party imports
+import pylint
 from qtpy.compat import getopenfilename
 from qtpy.QtCore import QByteArray, QProcess, QTextCodec, Signal, Slot
 from qtpy.QtWidgets import (QHBoxLayout, QLabel, QMessageBox, QTreeWidgetItem,
@@ -28,11 +28,11 @@ from qtpy.QtWidgets import (QHBoxLayout, QLabel, QMessageBox, QTreeWidgetItem,
 # Local imports
 from spyder import dependencies
 from spyder.config.base import get_conf_path, get_translation
-from spyder.py3compat import getcwd, pickle, PY3, to_text_string
+from spyder.py3compat import pickle, to_text_string
 from spyder.utils import icon_manager as ima
-from spyder.utils import programs
 from spyder.utils.encoding import to_unicode_from_fs
 from spyder.utils.qthelpers import create_toolbutton
+from spyder.utils.misc import getcwd_or_home
 from spyder.widgets.comboboxes import (is_module_or_package,
                                        PythonModulesComboBox)
 from spyder.widgets.onecolumntree import OneColumnTree
@@ -46,46 +46,17 @@ except KeyError as error:
     import gettext
     _ = gettext.gettext
 
-
-PYLINT = 'pylint'
-if PY3:
-    if programs.find_program('pylint3'):
-        PYLINT = 'pylint3'
-    elif programs.find_program('python3-pylint'):
-        PYLINT = 'python3-pylint'
-
-
 locale_codec = QTextCodec.codecForLocale()
-PYLINT_PATH = programs.find_program(PYLINT)
-
-
-def get_pylint_version():
-    """Return pylint version"""
-    if PYLINT_PATH is None:
-        return
-    cwd = osp.dirname(PYLINT_PATH)
-    args = ['--version']
-    if os.name == 'nt':
-        cmd = ' '.join([PYLINT] + args)
-        process = programs.run_shell_command(cmd, cwd=cwd)
-    else:
-        process = programs.run_program(PYLINT, args, cwd=cwd)
-    lines = to_unicode_from_fs(process.stdout.read()).splitlines()
-    if lines:
-        regex = '({0}*|pylint-script.py) ([0-9\.]*)'.format(PYLINT)
-        match = re.match(regex, lines[0])
-        if match is not None:
-            return match.groups()[1]
-
-
 PYLINT_REQVER = '>=0.25'
-PYLINT_VER = get_pylint_version()
+PYLINT_VER = pylint.__version__
 dependencies.add("pylint", _("Static code analysis"),
                  required_version=PYLINT_REQVER, installed_version=PYLINT_VER)
 
 
 #TODO: display results on 3 columns instead of 1: msg_id, lineno, message
 class ResultsTree(OneColumnTree):
+    sig_edit_goto = Signal(str, int, str)
+
     def __init__(self, parent):
         OneColumnTree.__init__(self, parent)
         self.filename = None
@@ -98,7 +69,7 @@ class ResultsTree(OneColumnTree):
         data = self.data.get(id(item))
         if data is not None:
             fname, lineno = data
-            self.parent().edit_goto.emit(fname, lineno, '')
+            self.sig_edit_goto.emit(fname, lineno, '')
 
     def clicked(self, item):
         """Click event"""
@@ -179,7 +150,7 @@ class PylintWidget(QWidget):
     VERSION = '1.1.0'
     redirect_stdio = Signal(bool)
     
-    def __init__(self, parent, max_entries=100):
+    def __init__(self, parent, max_entries=100, options_button=None):
         QWidget.__init__(self, parent)
         
         self.setWindowTitle("Pylint")
@@ -198,9 +169,6 @@ class PylintWidget(QWidget):
                 pass
 
         self.filecombo = PythonModulesComboBox(self)
-        if self.rdata:
-            self.remove_obsolete_items()
-            self.filecombo.addItems(self.get_filenames())
         
         self.start_button = create_toolbutton(self, icon=ima.icon('run'),
                                     text=_("Analyze"),
@@ -232,6 +200,8 @@ class PylintWidget(QWidget):
         hlayout1.addWidget(browse_button)
         hlayout1.addWidget(self.start_button)
         hlayout1.addWidget(self.stop_button)
+        if options_button:
+            hlayout1.addWidget(options_button)
 
         hlayout2 = QHBoxLayout()
         hlayout2.addWidget(self.ratelabel)
@@ -248,28 +218,15 @@ class PylintWidget(QWidget):
         
         self.process = None
         self.set_running_state(False)
-        
-        if PYLINT_PATH is None:
-            for widget in (self.treewidget, self.filecombo,
-                           self.start_button, self.stop_button):
-                widget.setDisabled(True)
-            if os.name == 'nt' \
-               and programs.is_module_installed("pylint"):
-                # Pylint is installed but pylint script is not in PATH
-                # (AFAIK, could happen only on Windows)
-                text = _('Pylint script was not found. Please add "%s" to PATH.')
-                text = to_text_string(text) % osp.join(sys.prefix, "Scripts")
-            else:
-                text = _('Please install <b>pylint</b>:')
-                url = 'http://www.logilab.fr'
-                text += ' <a href=%s>%s</a>' % (url, url)
-            self.ratelabel.setText(text)
+        self.show_data()
+
+        if self.rdata:
+            self.remove_obsolete_items()
+            self.filecombo.addItems(self.get_filenames())
         else:
-            self.show_data()
-        
+            self.start_button.setEnabled(False)
+
     def analyze(self, filename):
-        if PYLINT_PATH is None:
-            return
         filename = to_text_string(filename) # filename is a QString instance
         self.kill_if_running()
         index, _data = self.get_data(filename)
@@ -285,8 +242,9 @@ class PylintWidget(QWidget):
     @Slot()
     def select_file(self):
         self.redirect_stdio.emit(False)
-        filename, _selfilter = getopenfilename(self, _("Select Python file"),
-                           getcwd(), _("Python files")+" (*.py ; *.pyw)")
+        filename, _selfilter = getopenfilename(
+                self, _("Select Python file"),
+                getcwd_or_home(), _("Python files")+" (*.py ; *.pyw)")
         self.redirect_stdio.emit(True)
         if filename:
             self.analyze(filename)
@@ -345,17 +303,18 @@ class PylintWidget(QWidget):
         
         plver = PYLINT_VER
         if plver is not None:
+            p_args = ['-m', 'pylint', '--output-format=text']
             if plver.split('.')[0] == '0':
-                p_args = ['-i', 'yes']
+                p_args += ['-i', 'yes']
             else:
                 # Option '-i' (alias for '--include-ids') was removed in pylint
                 # 1.0
-                p_args = ["--msg-template='{msg_id}:{line:3d},"\
-                          "{column}: {obj}: {msg}"]
+                p_args += ["--msg-template='{msg_id}:{line:3d},"\
+                           "{column}: {obj}: {msg}"]
             p_args += [osp.basename(filename)]
         else:
             p_args = [osp.basename(filename)]
-        self.process.start(PYLINT_PATH, p_args)
+        self.process.start(sys.executable, p_args)
         
         running = self.process.waitForStarted()
         self.set_running_state(running)
@@ -403,7 +362,7 @@ class PylintWidget(QWidget):
                 module = line[len(txt_module):]
                 continue
             # Supporting option include-ids: ('R3873:' instead of 'R:')
-            if not re.match('^[CRWE]+([0-9]{4})?:', line):
+            if not re.match(r'^[CRWE]+([0-9]{4})?:', line):
                 continue
             i1 = line.find(':')
             if i1 == -1:

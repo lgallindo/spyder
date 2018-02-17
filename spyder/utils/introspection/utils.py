@@ -35,13 +35,15 @@ class CodeInfo(object):
                                  re.UNICODE)
 
     def __init__(self, name, source_code, position, filename=None,
-            is_python_like=False, in_comment_or_string=False, **kwargs):
+                 is_python_like=False, in_comment_or_string=False,
+                 sys_path=None, **kwargs):
         self.__dict__.update(kwargs)
         self.name = name
         self.filename = filename
         self.source_code = source_code
         self.is_python_like = is_python_like
         self.in_comment_or_string = in_comment_or_string
+        self.sys_path = sys_path
 
         self.position = position
 
@@ -126,7 +128,7 @@ class CodeInfo(object):
                 self.position = self.position - len(self.line) + self.column
 
     def _get_docstring(self):
-        """Find the docstring we are currently in"""
+        """Find the docstring we are currently in."""
         left = self.position
         while left:
             if self.source_code[left: left + 3] in ['"""', "'''"]:
@@ -150,7 +152,7 @@ class CodeInfo(object):
             return False
 
     def __getitem__(self, item):
-        """Allow dictionary-like access"""
+        """Allow dictionary-like access."""
         return getattr(self, item)
 
     def serialize(self):
@@ -201,7 +203,7 @@ def get_keywords(lexer):
                     ini_val = val[0]
                     if ')\\b' in val[0] or ')(\\s+)' in val[0]:
                         val = re.sub(r'\\.', '', val[0])
-                        val = re.sub('[^0-9a-zA-Z|]+', '', val)
+                        val = re.sub(r'[^0-9a-zA-Z|]+', '', val)
                         if '|' in ini_val:
                             keywords.extend(val.split('|'))
                         else:
@@ -210,11 +212,37 @@ def get_keywords(lexer):
                 continue
     return keywords
 
+def get_words(file_path=None, content=None, extension=None):
+    """
+    Extract all words from a source code file to be used in code completion.
+
+    Extract the list of words that contains the file in the editor,
+    to carry out the inline completion similar to VSCode.
+    """
+    if (file_path is None and (content is None or extension is None) or
+                    file_path and content and extension):
+        error_msg = ('Must provide `file_path` or `content` and `extension`')
+        raise Exception(error_msg)
+
+    if file_path and content is None and extension is None:
+        extension = os.path.splitext(file_path)[1]
+        with open(file_path) as infile:
+            content = infile.read()
+
+    if extension in ['.css']:
+        regex = re.compile(r'([^a-zA-Z-])')
+    elif extension in ['.R', '.c', 'md', '.cpp, java', '.py']:
+        regex = re.compile(r'([^a-zA-Z_])')
+    else:
+        regex = re.compile(r'([^a-zA-Z])')
+
+    words = sorted(set(regex.sub(r' ', content).split()))
+    return words
 
 @memoize
 def get_parent_until(path):
     """
-    Given a file path, determine the full module path
+    Given a file path, determine the full module path.
 
     e.g. '/usr/lib/python2.7/dist-packages/numpy/core/__init__.pyc' yields
     'numpy.core'
@@ -237,12 +265,6 @@ def get_parent_until(path):
     return '.'.join(reversed(items))
 
 
-if __name__ == '__main__':
-    code = 'import numpy'
-    test = CodeInfo('test', code, len(code) - 2)
-    assert test.obj == 'num'
-    assert test.full_obj == 'numpy'
-    test2 = CodeInfo('test', code, len(code) - 2)
-    assert test == test2
-    test3 = pickle.loads(pickle.dumps(test2.__dict__))
-    assert test3['full_obj'] == 'numpy'
+def default_info_response():
+    """Default response when asking for info."""
+    return dict(name='', argspec='', note='', docstring='', calltip='')

@@ -18,7 +18,7 @@ from qtpy.QtWidgets import QApplication
 import zmq
 
 # Local imports
-from spyder.config.base import debug_print, DEV, get_module_path
+from spyder.config.base import debug_print, get_module_path
 
 
 # Heartbeat timer in milliseconds
@@ -52,6 +52,8 @@ class AsyncClient(QObject):
         self.env = env
         self.is_initialized = False
         self.closing = False
+        self.notifier = None
+        self.process = None
         self.context = zmq.Context()
         QApplication.instance().aboutToQuit.connect(self.close)
 
@@ -77,7 +79,7 @@ class AsyncClient(QObject):
         # Set up environment variables.
         processEnvironment = QProcessEnvironment()
         env = self.process.systemEnvironment()
-        if (self.env and 'PYTHONPATH' not in self.env) or DEV:
+        if (self.env and 'PYTHONPATH' not in self.env) or self.env is None:
             python_path = osp.dirname(get_module_path('spyder'))
             # Add the libs to the python path.
             for lib in self.libs:
@@ -129,12 +131,17 @@ class AsyncClient(QObject):
         self.closing = True
         self.is_initialized = False
         self.timer.stop()
-        self.notifier.activated.disconnect(self._on_msg_received)
-        self.notifier.setEnabled(False)
-        del self.notifier
+
+        if self.notifier is not None:
+            self.notifier.activated.disconnect(self._on_msg_received)
+            self.notifier.setEnabled(False)
+            self.notifier = None
+
         self.request('server_quit')
-        self.process.waitForFinished(1000)
-        self.process.close()
+
+        if self.process is not None:
+            self.process.waitForFinished(1000)
+            self.process.close()
         self.context.destroy()
 
     def _on_finished(self):
@@ -192,11 +199,13 @@ class AsyncClient(QObject):
 
 class PluginClient(AsyncClient):
 
-    def __init__(self, plugin_name, executable=None, env=None):
+    def __init__(self, plugin_name, executable=None, env=None,
+                 extra_path=None):
         cwd = os.path.dirname(__file__)
-        super(PluginClient, self).__init__('plugin_server.py',
-            executable=executable, cwd=cwd, env=env,
-            extra_args=[plugin_name], libs=[plugin_name])
+        super(PluginClient, self).__init__(
+                'plugin_server.py',
+                executable=executable, cwd=cwd, env=env,
+                extra_args=[plugin_name], libs=[plugin_name])
         self.name = plugin_name
 
 
@@ -206,18 +215,18 @@ if __name__ == '__main__':
     plugin.run()
 
     def handle_return(value):
-        print(value)
+        print(value)  # spyder: test-skip
         if value['func_name'] == 'foo':
             app.quit()
         else:
             plugin.request('foo')
 
     def handle_errored():
-        print('errored')
+        print('errored')  # spyder: test-skip
         sys.exit(1)
 
     def start():
-        print('start')
+        print('start')  # spyder: test-skip
         plugin.request('validate')
 
     plugin.errored.connect(handle_errored)

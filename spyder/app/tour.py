@@ -30,6 +30,7 @@ from qtpy.QtWidgets import (QAction, QApplication, QComboBox, QDialog,
 from spyder.config.base import _, get_image_path
 from spyder.py3compat import to_binary_string
 from spyder.utils.qthelpers import add_actions, create_action
+from spyder.utils import icon_manager as ima
 
 # FIXME: Known issues
 # How to handle if an specific dockwidget does not exists/load, like ipython
@@ -38,7 +39,6 @@ from spyder.utils.qthelpers import add_actions, create_action
 class SpyderWidgets(object):
     """List of supported widgets to highlight/decorate"""
     # Panes
-    external_console = 'extconsole'
     ipython_console = 'ipyconsole'
     editor = 'editor'
     editor_line_number_area = 'editor.get_current_editor().linenumberarea'
@@ -176,21 +176,6 @@ def get_tour(index):
                            "can inspect and modify their contents."),
               'widgets': [sw.variable_explorer],
               'interact': True},
-
-             {'title': _("The Python console"),
-              'content': _("You can also run your code on a Python console. "
-                           "These consoles are useful because they let you "
-                           "run a file in a console dedicated only to it."
-                           "To select this behavior, please press the <b>F6</b> "
-                           "key.<br><br>"
-                           "By pressing the button below and then focusing the "
-                           "Variable Explorer, you will notice that "
-                           "Python consoles are also connected to that pane, "
-                           "and that the Variable Explorer only shows "
-                           "the variables of the currently focused console."),
-              'widgets': [sw.external_console],
-              'run': ["a = 2", "s='Hello, world!'"],
-              },
 
              {'title': _("Help"),
               'content': _("This pane displays documentation of the "
@@ -393,10 +378,13 @@ class FadingDialog(QDialog):
 
 class FadingCanvas(FadingDialog):
     """The black semi transparent canvas that covers the application"""
-    def __init__(self, parent, opacity, duration, easing_curve, color):
+    def __init__(self, parent, opacity, duration, easing_curve, color,
+                 tour=None):
+        """Create a black semi transparent canvas that covers the app."""
         super(FadingCanvas, self).__init__(parent, opacity, duration,
                                            easing_curve)
         self.parent = parent
+        self.tour = tour
 
         self.color = color              # Canvas color
         self.color_decoration = Qt.red  # Decoration color
@@ -524,14 +512,27 @@ class FadingCanvas(FadingDialog):
         """Override Qt method"""
         pass
 
+    def focusInEvent(self, event):
+        """Override Qt method."""
+        # To be used so tips do not appear outside spyder
+        if self.hasFocus():
+            self.tour.gain_focus()
+
+    def focusOutEvent(self, event):
+        """Override Qt method."""
+        # To be used so tips do not appear outside spyder
+        if self.tour.step_current != 0:
+            self.tour.lost_focus()
+
 
 class FadingTipBox(FadingDialog):
     """ """
-    def __init__(self, parent, opacity, duration, easing_curve):
+    def __init__(self, parent, opacity, duration, easing_curve, tour=None):
         super(FadingTipBox, self).__init__(parent, opacity, duration,
                                            easing_curve)
         self.holder = self.anim  # needed for qt to work
         self.parent = parent
+        self.tour = tour
 
         self.frames = None
         self.color_top = QColor.fromRgb(230, 230, 230)
@@ -547,11 +548,17 @@ class FadingTipBox(FadingDialog):
         self.setModal(False)
 
         # Widgets
-        self.button_home = QPushButton("<<")
-        self.button_close = QPushButton("X")
-        self.button_previous = QPushButton(" < ")
-        self.button_end = QPushButton(">>")
-        self.button_next = QPushButton(" > ")
+        def toolbutton(icon):
+            bt = QToolButton()
+            bt.setAutoRaise(True)
+            bt.setIcon(icon)
+            return bt
+
+        self.button_close = toolbutton(ima.icon("tour.close"))
+        self.button_home = toolbutton(ima.icon("tour.home"))
+        self.button_previous = toolbutton(ima.icon("tour.previous"))
+        self.button_end = toolbutton(ima.icon("tour.end"))
+        self.button_next = toolbutton(ima.icon("tour.next"))
         self.button_run = QPushButton(_('Run code'))
         self.button_disable = None
         self.button_current = QToolButton()
@@ -577,27 +584,7 @@ class FadingTipBox(FadingDialog):
 
         arrow = get_image_path('hide.png')
 
-        self.stylesheet = '''QPushButton {
-                             background-color: rgbs(200,200,200,100%);
-                             color: rgbs(0,0,0,100%);
-                             border-style: outset;
-                             border-width: 1px;
-                             border-radius: 3px;
-                             border-color: rgbs(100,100,100,100%);
-                             padding: 2px;
-                             }
-
-                             QPushButton:hover {
-                             background-color: rgbs(150, 150, 150, 100%);
-                             }
-
-                             QPushButton:disabled {
-                             background-color: rgbs(230,230,230,100%);
-                             color: rgbs(200,200,200,100%);
-                             border-color: rgbs(200,200,200,100%);
-                             }
-
-                             QComboBox {
+        self.stylesheet = '''QComboBox {
                              padding-left: 5px;
                              background-color: rgbs(230,230,230,100%);
                              border-width: 0px;
@@ -620,6 +607,7 @@ class FadingTipBox(FadingDialog):
         # Windows fix, slashes should be always in unix-style
         self.stylesheet = self.stylesheet.replace('\\', '/')
 
+        self.setFocusPolicy(Qt.StrongFocus)
         for widget in self.widgets:
             widget.setFocusPolicy(Qt.NoFocus)
             widget.setStyleSheet(self.stylesheet)
@@ -671,7 +659,7 @@ class FadingTipBox(FadingDialog):
         self.setLayout(layout)
 
         self.set_funcs_before_fade_in([self._disable_widgets])
-        self.set_funcs_after_fade_in([self._enable_widgets])
+        self.set_funcs_after_fade_in([self._enable_widgets, self.setFocus])
         self.set_funcs_before_fade_out([self._disable_widgets])
 
         self.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -741,7 +729,7 @@ class FadingTipBox(FadingDialog):
     def build_paths(self):
         """ """
         geo = self.geometry()
-        radius = 30
+        radius = 0
         shadow = self.offset_shadow
         x0, y0 = geo.x(), geo.y()
         width, height = geo.width() - shadow, geo.height() - shadow
@@ -794,7 +782,7 @@ class FadingTipBox(FadingDialog):
         """ """
         key = event.key()
         self.key_pressed = key
-#        print(key)
+
         keys = [Qt.Key_Right, Qt.Key_Left, Qt.Key_Down, Qt.Key_Up,
                 Qt.Key_Escape, Qt.Key_PageUp, Qt.Key_PageDown,
                 Qt.Key_Home, Qt.Key_End, Qt.Key_Menu]
@@ -814,6 +802,11 @@ class FadingTipBox(FadingDialog):
 #            clicked_widget = self.childAt(event.x(), event.y())
 #            if clicked_widget == self.label_current:
 #            self.context_menu_requested(event)
+
+    def focusOutEvent(self, event):
+        """Override Qt method."""
+        # To be used so tips do not appear outside spyder
+        self.tour.lost_focus()
 
     def context_menu_requested(self, event):
         """ """
@@ -868,13 +861,15 @@ class AnimatedTour(QWidget):
         self.run = None
 
         self.is_tour_set = False
+        self.is_running = False
 
         # Widgets
         self.canvas = FadingCanvas(self.parent, self.opacity_canvas,
                                    self.duration_canvas, self.easing_curve,
-                                   self.color)
+                                   self.color, tour=self)
         self.tips = FadingTipBox(self.parent, self.opacity_tips,
-                                 self.duration_tips, self.easing_curve)
+                                 self.duration_tips, self.easing_curve,
+                                 tour=self)
 
         # Widgets setup
         # Needed to fix issue #2204
@@ -898,26 +893,31 @@ class AnimatedTour(QWidget):
         # To capture the arrow keys that allow moving the tour
         self.tips.sig_key_pressed.connect(self._key_pressed)
 
+        # To control the focus of tour
+        self.setting_data = False
+        self.hidden = False
+
     def _resized(self, event):
         """ """
-        size = event.size()
-        self.canvas.setFixedSize(size)
-        self.canvas.update_canvas()
+        if self.is_running:
+            size = event.size()
+            self.canvas.setFixedSize(size)
+            self.canvas.update_canvas()
 
-        if self.is_tour_set:
-            self._set_data()
+            if self.is_tour_set:
+                self._set_data()
 
     def _moved(self, event):
         """ """
-        pos = event.pos()
-        self.canvas.move(QPoint(pos.x(), pos.y()))
+        if self.is_running:
+            pos = event.pos()
+            self.canvas.move(QPoint(pos.x(), pos.y()))
 
-        if self.is_tour_set:
-            self._set_data()
+            if self.is_tour_set:
+                self._set_data()
 
     def _close_canvas(self):
         """ """
-        self._set_modal(False, [self.tips])
         self.tips.hide()
         self.canvas.fade_out(self.canvas.hide)
 
@@ -987,7 +987,8 @@ class AnimatedTour(QWidget):
         return widgets, dockwidgets
 
     def _set_data(self):
-        """ """
+        """Set data that is displayed in each step of the tour."""
+        self.setting_data = True
         step, steps, frames = self.step_current, self.steps, self.frames
         current = '{0}/{1}'.format(step + 1, steps)
         frame = frames[step]
@@ -1045,6 +1046,7 @@ class AnimatedTour(QWidget):
         # Make canvas black when starting a new place of decoration
         self.canvas.update_widgets(dockwidgets)
         self.canvas.update_decoration(decoration)
+        self.setting_data = False
 
     def _locate_tip_box(self):
         """ """
@@ -1125,13 +1127,17 @@ class AnimatedTour(QWidget):
             pos = self.tips.label_current.pos()
             self.tips.context_menu_requested(pos)
 
+    def _hiding(self):
+        self.hidden = True
+        self.tips.hide()
+
     # --- public api
     def run_code(self):
         """ """
         codelines = self.run
         console = self.widgets[0]
         for codeline in codelines:
-            console.execute_python_code(codeline)
+            console.execute_code(codeline)
 
     def set_tour(self, index, frames, spy_window):
         """ """
@@ -1162,10 +1168,14 @@ class AnimatedTour(QWidget):
         self.canvas.fade_in(self._move_step)
         self._clear_canvas()
 
+        self.is_running = True
+
     def close_tour(self):
         """ """
         self.tips.fade_out(self._close_canvas)
-        self.tips.show()
+        self.canvas.set_interaction(False)
+        self._set_modal(True, [self.tips])
+        self.canvas.hide()
 
         try:
             # set the last played frame by updating the available tours in 
@@ -1174,6 +1184,19 @@ class AnimatedTour(QWidget):
                 self.step_current
         except:
             pass
+
+        self.is_running = False
+
+    def hide_tips(self):
+        """Hide tips dialog when the main window loses focus."""
+        self._clear_canvas()
+        self.tips.fade_out(self._hiding)
+
+    def unhide_tips(self):
+        """Unhide tips dialog when the main window loses focus."""
+        self._clear_canvas()
+        self._move_step()
+        self.hidden = False
 
     def next_step(self):
         """ """
@@ -1201,17 +1224,35 @@ class AnimatedTour(QWidget):
         """ """
         self.go_to_step(0)
 
+    def lost_focus(self):
+        """Confirm if the tour loses focus and hides the tips."""
+        if (self.is_running and not self.any_has_focus() and
+            not self.setting_data and not self.hidden):
+            self.hide_tips()
+
+    def gain_focus(self):
+        """Confirm if the tour regains focus and unhides the tips."""
+        if (self.is_running and self.any_has_focus() and 
+            not self.setting_data and self.hidden):
+            self.unhide_tips()
+
+    def any_has_focus(self):
+        """Returns if tour or any of its components has focus."""
+        f = (self.hasFocus() or self.parent.hasFocus() or 
+             self.tips.hasFocus() or self.canvas.hasFocus())
+        return f
+
 # ----------------------------------------------------------------------------
 # Used for testing the functionality
 
 
-class TestWindow(QMainWindow):
+class TourTestWindow(QMainWindow):
     """ """
     sig_resized = Signal("QResizeEvent")
     sig_moved = Signal("QMoveEvent")
 
     def __init__(self):
-        super(TestWindow, self).__init__()
+        super(TourTestWindow, self).__init__()
         self.setGeometry(300, 100, 400, 600)
         self.setWindowTitle('Exploring QMainWindow')
 
@@ -1235,7 +1276,7 @@ class TestWindow(QMainWindow):
 
         effect = QGraphicsOpacityEffect(self.button2)
         self.button2.setGraphicsEffect(effect)
-        self.anim = QPropertyAnimation(effect, "opacity")
+        self.anim = QPropertyAnimation(effect, to_binary_string("opacity"))
         self.anim.setStartValue(0.01)
         self.anim.setEndValue(1.0)
         self.anim.setDuration(500)
@@ -1280,7 +1321,7 @@ class TestWindow(QMainWindow):
 def test():
     """ """
     app = QApplication([])
-    win = TestWindow()
+    win = TourTestWindow()
     win.show()
     app.exec_()
 

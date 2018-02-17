@@ -25,12 +25,12 @@ from qtpy.QtWidgets import QMessageBox
 # Local imports
 from spyder import get_versions
 from spyder.interpreter import Interpreter
-from spyder.py3compat import (builtins, getcwd, to_binary_string,
-                              to_text_string, u)
+from spyder.py3compat import (builtins, to_binary_string,
+                              to_text_string)
 from spyder.utils import icon_manager as ima
 from spyder.utils import programs
 from spyder.utils.dochelpers import getargtxt, getdoc, getobjdir, getsource
-from spyder.utils.misc import get_error_match
+from spyder.utils.misc import get_error_match, getcwd_or_home
 from spyder.utils.qthelpers import create_action
 from spyder.widgets.shell import PythonShellWidget
 from spyder.widgets.variableexplorer.objecteditor import oedit
@@ -143,13 +143,10 @@ class InternalShell(PythonShellWidget):
         self.set_light_background(light_background)
         self.multithreaded = multithreaded
         self.setMaximumBlockCount(max_line_count)
-        
-        # For compatibility with ExtPythonShellWidget
-        self.is_ipykernel = False
-        
+
         if font is not None:
             self.set_font(font)
-        
+
         # Allow raw_input support:
         self.input_loop = None
         self.input_mode = False
@@ -338,7 +335,7 @@ class InternalShell(PythonShellWidget):
             t0 = time()
             for _ in range(10):
                 self.execute_command(command)
-            self.insert_text(u("\n<Δt>=%dms\n") % (1e2*(time()-t0)))
+            self.insert_text(u"\n<Δt>=%dms\n" % (1e2*(time()-t0)))
             self.new_prompt(self.interpreter.p1)
         else:
             self.execute_command(command)
@@ -433,7 +430,7 @@ class InternalShell(PythonShellWidget):
         
     def get_cdlistdir(self):
         """Return shell current directory list dir"""
-        return os.listdir(getcwd())
+        return os.listdir(getcwd_or_home())
                 
     def iscallable(self, objtxt):
         """Is object callable?"""

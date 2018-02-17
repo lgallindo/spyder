@@ -7,6 +7,8 @@
 """Simple web browser widget"""
 
 # Standard library imports
+import re
+import sre_constants
 import sys
 
 # Third party imports
@@ -15,12 +17,14 @@ from qtpy.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar, QMenu,
                             QVBoxLayout, QWidget)
 from qtpy.QtWebEngineWidgets import (QWebEnginePage, QWebEngineSettings,
                                      QWebEngineView, WEBENGINE)
+from qtpy.QtGui import QFontInfo
 
 # Local imports
 from spyder.config.base import _, DEV
 from spyder.py3compat import is_text_string, to_text_string
 from spyder.utils.qthelpers import (action2button, add_actions,
-                                    create_action, create_toolbutton)
+                                    create_action, create_toolbutton,
+                                    create_plugin_layout)
 from spyder.utils import icon_manager as ima
 from spyder.widgets.comboboxes import UrlComboBox
 from spyder.widgets.findreplace import FindReplace
@@ -60,6 +64,7 @@ class WebView(QWebEngineView):
         if WEBENGINE:
             web_page = WebPage(self)
             self.setPage(web_page)
+            self.source_text = ''
 
     def find_text(self, text, changed=True,
                   forward=True, case=False, words=False,
@@ -80,8 +85,39 @@ class WebView(QWebEngineView):
     def get_selected_text(self):
         """Return text selected by current text cursor"""
         return self.selectedText()
-        
+
+    def set_source_text(self, source_text):
+        """Set source text of the page. Callback for QWebEngineView."""
+        self.source_text = source_text
+
+    def get_number_matches(self, pattern, source_text='', case=False):
+        """Get the number of matches for the searched text."""
+        pattern = to_text_string(pattern)
+        if not pattern:
+            return 0
+        if not source_text:
+            if WEBENGINE:
+                self.page().toPlainText(self.set_source_text)
+                source_text = to_text_string(self.source_text)
+            else:
+                source_text = to_text_string(
+                        self.page().mainFrame().toPlainText())
+        try:
+            if case:
+                regobj = re.compile(pattern)
+            else:
+                regobj = re.compile(pattern, re.IGNORECASE)
+        except sre_constants.error:
+            return
+
+        number_matches = 0
+        for match in regobj.finditer(source_text):
+            number_matches += 1
+
+        return number_matches
+
     def set_font(self, font, fixed_font=None):
+        font = QFontInfo(font)
         settings = self.page().settings()
         for fontfamily in (settings.StandardFont, settings.SerifFont,
                            settings.SansSerifFont, settings.CursiveFont,
@@ -89,7 +125,7 @@ class WebView(QWebEngineView):
             settings.setFontFamily(fontfamily, font.family())
         if fixed_font is not None:
             settings.setFontFamily(settings.FixedFont, fixed_font.family())
-        size = font.pointSize()
+        size = font.pixelSize()
         settings.setFontSize(settings.DefaultFontSize, size)
         settings.setFontSize(settings.DefaultFixedFontSize, size)
         
@@ -142,13 +178,28 @@ class WebView(QWebEngineView):
         add_actions(menu, actions)
         menu.popup(event.globalPos())
         event.accept()
-                
+
+    def setHtml(self, html, baseUrl=QUrl()):
+        """
+        Reimplement Qt method to prevent WebEngine to steal focus
+        when setting html on the page
+
+        Solution taken from
+        https://bugreports.qt.io/browse/QTBUG-52999
+        """
+        if WEBENGINE:
+            self.setEnabled(False)
+            super(WebView, self).setHtml(html, baseUrl)
+            self.setEnabled(True)
+        else:
+            super(WebView, self).setHtml(html, baseUrl)
+
 
 class WebBrowser(QWidget):
     """
     Web browser widget
     """
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, options_button=None):
         QWidget.__init__(self, parent)
         
         self.home_url = None
@@ -205,8 +256,10 @@ class WebBrowser(QWidget):
                        refresh_button, progressbar, stop_button):
             hlayout.addWidget(widget)
         
-        layout = QVBoxLayout()
-        layout.addLayout(hlayout)
+        if options_button:
+            hlayout.addWidget(options_button)
+
+        layout = create_plugin_layout(hlayout)
         layout.addWidget(self.webview)
         layout.addWidget(self.find_widget)
         self.setLayout(layout)

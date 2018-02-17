@@ -79,20 +79,19 @@ else:
     import reprlib
     import queue as Queue
 
+
 #==============================================================================
 # Strings
 #==============================================================================
-if PY2:
-    # Python 2
-    import codecs
-    def u(obj):
-        """Make unicode object"""
-        return codecs.unicode_escape_decode(obj)[0]
-else:
-    # Python 3
-    def u(obj):
-        """Return string as it is"""
-        return obj
+def is_type_text_string(obj):
+    """Return True if `obj` is type text string, False if it is anything else,
+    like an instance of a class that extends the basestring class."""
+    if PY2:
+        # Python 2
+        return type(obj) in [str, unicode]
+    else:
+        # Python 3
+        return type(obj) in [str, bytes]
 
 def is_text_string(obj):
     """Return True if `obj` is a text string, False if it is anything else,

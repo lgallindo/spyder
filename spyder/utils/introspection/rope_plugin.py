@@ -22,10 +22,11 @@ from spyder.utils.introspection.manager import (
 from spyder.utils.introspection.module_completion import (
     get_preferred_submodules)
 from spyder.utils.introspection.manager import ROPE_REQVER
+from spyder.utils.introspection.utils import default_info_response
 
 try:
     try:
-        from spyder import rope_patch
+        from spyder.utils.introspection import rope_patch
         rope_patch.apply()
     except ImportError:
         # rope is not installed
@@ -81,6 +82,9 @@ class RopePlugin(IntrospectionPlugin):
         source_code = info['source_code']
         offset = info['position']
 
+        # Set python path into rope project
+        self.project.prefs.set('python_path', info['sys_path'])
+
         # Prevent Rope from returning import completions because
         # it can't handle them. Only Jedi can do it!
         lines = sourcecode.split_source(source_code[:offset])
@@ -89,12 +93,13 @@ class RopePlugin(IntrospectionPlugin):
           and not ';' in last_line:
             return []
 
-        if PY2:
-            filename = filename.encode('utf-8')
-        else:
-            #TODO: test if this is working without any further change in
-            # Python 3 with a user account containing unicode characters
-            pass
+        if filename is not None:
+            if PY2:
+                filename = filename.encode('utf-8')
+            else:
+                # TODO: test if this is working without any further change in
+                # Python 3 with a user account containing unicode characters
+                pass
         try:
             resource = rope.base.libutils.path_to_resource(self.project,
                                                            filename)
@@ -119,17 +124,21 @@ class RopePlugin(IntrospectionPlugin):
     def get_info(self, info):
         """Get a formatted calltip and docstring from Rope"""
         if self.project is None:
-            return
+            return default_info_response()
         filename = info['filename']
         source_code = info['source_code']
         offset = info['position']
 
-        if PY2:
-            filename = filename.encode('utf-8')
-        else:
-            #TODO: test if this is working without any further change in
-            # Python 3 with a user account containing unicode characters
-            pass
+        # Set python path into rope project
+        self.project.prefs.set('python_path', info['sys_path'])
+
+        if filename is not None:
+            if PY2:
+                filename = filename.encode('utf-8')
+            else:
+                # TODO: test if this is working without any further change in
+                # Python 3 with a user account containing unicode characters
+                pass
         try:
             resource = rope.base.libutils.path_to_resource(self.project,
                                                            filename)
@@ -201,10 +210,10 @@ class RopePlugin(IntrospectionPlugin):
                 note = 'Present in %s module' % module
 
         if not doc_text and not calltip:
-            return
+            return default_info_response()
 
         return dict(name=obj_fullname, argspec=argspec, note=note,
-            docstring=doc_text, calltip=calltip)
+                    docstring=doc_text, calltip=calltip)
 
     def get_definition(self, info):
         """Find a definition location using Rope"""
@@ -215,12 +224,15 @@ class RopePlugin(IntrospectionPlugin):
         source_code = info['source_code']
         offset = info['position']
 
-        if PY2:
-            filename = filename.encode('utf-8')
-        else:
-            #TODO: test if this is working without any further change in
-            # Python 3 with a user account containing unicode characters
-            pass
+        # Set python path into rope project
+        self.project.prefs.set('python_path', info['sys_path'])
+        if filename is not None:
+            if PY2:
+                filename = filename.encode('utf-8')
+            else:
+                # TODO: test if this is working without any further change in
+                # Python 3 with a user account containing unicode characters
+                pass
         try:
             resource = rope.base.libutils.path_to_resource(self.project,
                                                            filename)
@@ -281,39 +293,3 @@ class RopePlugin(IntrospectionPlugin):
         """Close the Rope project"""
         if self.project is not None:
             self.project.close()
-
-
-if __name__ == '__main__':
-
-    from spyder.utils.introspection.manager import CodeInfo
-
-    p = RopePlugin()
-    p.load_plugin()
-
-    source_code = "import numpy; numpy.ones"
-    docs = p.get_info(CodeInfo('info', source_code, len(source_code),
-                                           __file__))
-    assert 'ones(' in docs['calltip'] and 'ones(' in docs['docstring']
-
-    source_code = "import numpy; n"
-    completions = p.get_completions(CodeInfo('completions', source_code,
-        len(source_code), __file__))
-    assert ('numpy', 'module') in completions
-
-    source_code = "import a"
-    completions = p.get_completions(CodeInfo('completions', source_code,
-        len(source_code), __file__))
-    assert not completions
-
-    code = '''
-def test(a, b):
-    """Test docstring"""
-    pass
-test(1,'''
-    path, line = p.get_definition(CodeInfo('definition', code, len(code),
-        'dummy.txt', is_python_like=True))
-    assert line == 2
-
-    docs = p.get_info(CodeInfo('info', code, len(code), __file__,
-        is_python_like=True))
-    assert 'Test docstring' in docs['docstring']

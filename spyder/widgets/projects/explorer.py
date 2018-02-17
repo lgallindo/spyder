@@ -15,7 +15,6 @@ import os.path as osp
 import shutil
 
 # Third party imports
-from qtpy import PYQT5
 from qtpy.QtCore import Qt, Signal, Slot
 from qtpy.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView,
                             QLabel, QMessageBox, QVBoxLayout, QWidget)
@@ -24,12 +23,14 @@ from qtpy.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView,
 from spyder.config.base import _
 from spyder.py3compat import to_text_string
 from spyder.utils import misc
-from spyder.utils.qthelpers import create_action
+from spyder.utils.qthelpers import create_action, create_plugin_layout
 from spyder.widgets.explorer import FilteredDirView
 
 
 class ExplorerTreeWidget(FilteredDirView):
     """Explorer tree widget"""
+    
+    sig_delete_project = Signal()
 
     def __init__(self, parent, show_hscrollbar=True):
         FilteredDirView.__init__(self, parent)
@@ -62,9 +63,9 @@ class ExplorerTreeWidget(FilteredDirView):
         self.show_hscrollbar = checked
         self.header().setStretchLastSection(not checked)
         self.header().setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
-        if PYQT5:
+        try:
             self.header().setSectionResizeMode(QHeaderView.ResizeToContents)
-        else:
+        except:  # support for qtpy<1.2.0
             self.header().setResizeMode(QHeaderView.ResizeToContents)
 
     #---- Internal drag & drop
@@ -95,8 +96,8 @@ class ExplorerTreeWidget(FilteredDirView):
         src_list = [to_text_string(url.toString())
                     for url in event.mimeData().urls()]
         if len(src_list) > 1:
-            buttons = QMessageBox.Yes|QMessageBox.YesAll| \
-                      QMessageBox.No|QMessageBox.NoAll|QMessageBox.Cancel
+            buttons = QMessageBox.Yes|QMessageBox.YesToAll| \
+                      QMessageBox.No|QMessageBox.NoToAll|QMessageBox.Cancel
         else:
             buttons = QMessageBox.Yes|QMessageBox.No
         for src in src_list:
@@ -116,9 +117,9 @@ class ExplorerTreeWidget(FilteredDirView):
                         continue
                     elif answer == QMessageBox.Cancel:
                         break
-                    elif answer == QMessageBox.YesAll:
+                    elif answer == QMessageBox.YesToAll:
                         yes_to_all = True
-                    elif answer == QMessageBox.NoAll:
+                    elif answer == QMessageBox.NoToAll:
                         no_to_all = True
                         continue
                 else:
@@ -149,6 +150,21 @@ class ExplorerTreeWidget(FilteredDirView):
                                        "<br><br>Error message:<br>%s"
                                        ) % (action_str, src,
                                             to_text_string(error)))
+    @Slot()
+    def delete(self, fnames=None):
+        """Delete files"""
+        if fnames is None:
+            fnames = self.get_selected_filenames()
+        multiple = len(fnames) > 1
+        yes_to_all = None
+        for fname in fnames:
+            if fname == self.proxymodel.path_list[0]:
+                self.sig_delete_project.emit()
+            else:
+                yes_to_all = self.delete_file(fname, multiple, yes_to_all)
+                if yes_to_all is not None and not yes_to_all:
+                    # Canceled
+                    break
 
 
 class ProjectExplorerWidget(QWidget):
@@ -157,23 +173,32 @@ class ProjectExplorerWidget(QWidget):
     sig_open_file = Signal(str)
 
     def __init__(self, parent, name_filters=[],
-                 show_all=True, show_hscrollbar=True):
+                 show_all=True, show_hscrollbar=True, options_button=None):
         QWidget.__init__(self, parent)
-        self.treewidget = None
-        self.emptywidget = None
+
         self.name_filters = name_filters
         self.show_all = show_all
         self.show_hscrollbar = show_hscrollbar
-        self.setup_layout()
 
-    def setup_layout(self):
-        """Setup project explorer widget layout"""
+        self.treewidget = ExplorerTreeWidget(self, self.show_hscrollbar)
+        self.treewidget.setup(name_filters=self.name_filters,
+                              show_all=self.show_all)
+        self.treewidget.setup_view()
+        self.treewidget.hide()
 
         self.emptywidget = ExplorerTreeWidget(self)
 
-        layout = QVBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
+        if options_button:
+            btn_layout = QHBoxLayout()
+            btn_layout.setAlignment(Qt.AlignLeft)
+            btn_layout.addStretch()
+            btn_layout.addWidget(options_button, Qt.AlignRight)
+            layout = create_plugin_layout(btn_layout)
+        else:
+            layout = QVBoxLayout()
+            layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.emptywidget)
+        layout.addWidget(self.treewidget)
         self.setLayout(layout)
 
     def closing_widget(self):
@@ -200,33 +225,54 @@ class ProjectExplorerWidget(QWidget):
 
     def setup_project(self, directory):
         """Setup project"""
-        if self.treewidget is not None:
-            self.treewidget.hide()
-
-        # Setup a new tree widget
-        self.treewidget = ExplorerTreeWidget(self, self.show_hscrollbar)
-        self.treewidget.setup(name_filters=self.name_filters,
-                              show_all=self.show_all)
-        self.treewidget.setup_view()
         self.emptywidget.hide()
         self.treewidget.show()
-        self.layout().addWidget(self.treewidget)
 
         # Setup the directory shown by the tree
         self.set_project_dir(directory)
 
+        # Signal to delete the project
+        self.treewidget.sig_delete_project.connect(self.delete_project)
+
+    def delete_project(self):
+        """Delete current project without deleting the files in the
+        directory."""
+        if self.current_active_project:
+            path = self.current_active_project.root_path
+            buttons = QMessageBox.Yes | QMessageBox.No
+            answer = QMessageBox.warning(self, _("Delete"),
+                                 _("Do you really want "
+                                   "to delete <b>{filename}</b>?<br><br>"
+                                   "<b>Note:</b> This action will only delete "
+                                   "the project. Its files are going to be "
+                                   "preserved on disk."
+                                   ).format(filename=osp.basename(path)),
+                                   buttons)
+            if answer == QMessageBox.Yes:
+                try:
+                    self.close_project()
+                    shutil.rmtree(osp.join(path,'.spyproject'))
+                except EnvironmentError as error:
+                    QMessageBox.critical(self, _("Project Explorer"),
+                                    _("<b>Unable to delete <i>{varpath}</i></b>"
+                                      "<br><br>The error message was:<br>{error}" )
+                                    .format(varpath=path,error=to_text_string(error)))
 
 #==============================================================================
 # Tests
 #==============================================================================
-class Test(QWidget):
-    def __init__(self):
+class ProjectExplorerTest(QWidget):
+    def __init__(self, directory=None):
         QWidget.__init__(self)
         vlayout = QVBoxLayout()
         self.setLayout(vlayout)
 
-        self.explorer = ProjectExplorerWidget(None, show_all=True)
-        self.explorer.setup_project(osp.dirname(osp.abspath(__file__)))
+        self.explorer = ProjectExplorerWidget(self, show_all=True)
+        if directory is not None:
+            self.directory = directory
+        else:
+            self.directory = osp.dirname(osp.abspath(__file__))
+        self.explorer.setup_project(self.directory)
         vlayout.addWidget(self.explorer)
 
         hlayout1 = QHBoxLayout()
@@ -252,7 +298,7 @@ class Test(QWidget):
 def test():
     from spyder.utils.qthelpers import qapplication
     app = qapplication()
-    test = Test()
+    test = ProjectExplorerTest()
     test.resize(250, 480)
     test.show()
     app.exec_()

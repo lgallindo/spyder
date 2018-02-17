@@ -17,24 +17,26 @@ import os.path as osp
 import sys
 
 # Third party imports
-from qtpy import PYQT5
 from qtpy.compat import getopenfilename
-from qtpy.QtCore import Signal, Slot
-from qtpy.QtWidgets import QInputDialog, QLineEdit, QMenu, QVBoxLayout
+from qtpy.QtCore import Qt, Signal, Slot
+from qtpy.QtWidgets import QInputDialog, QLineEdit, QMenu, QHBoxLayout
 
 # Local imports
-from spyder.config.base import _, debug_print
+from spyder.config.base import _, DEV, debug_print
 from spyder.config.main import CONF
 from spyder.utils import icon_manager as ima
 from spyder.utils.environ import EnvDialog
-from spyder.utils.misc import get_error_match, remove_backslashes
+from spyder.utils.misc import (get_error_match, remove_backslashes,
+                               getcwd_or_home)
 from spyder.utils.qthelpers import (add_actions, create_action,
-                                    DialogManager, mimedata2url)
+                                    create_plugin_layout, DialogManager,
+                                    mimedata2url, MENU_SEPARATOR)
 from spyder.widgets.internalshell import InternalShell
 from spyder.widgets.findreplace import FindReplace
 from spyder.widgets.variableexplorer.collectionseditor import CollectionsEditor
-from spyder.plugins import SpyderPluginWidget
-from spyder.py3compat import getcwd, to_text_string
+from spyder.widgets.reporterror import SpyderErrorDialog
+from spyder.api.plugins import SpyderPluginWidget
+from spyder.py3compat import to_text_string
 
 
 class Console(SpyderPluginWidget):
@@ -48,11 +50,8 @@ class Console(SpyderPluginWidget):
     
     def __init__(self, parent=None, namespace=None, commands=[], message=None,
                  exitfunc=None, profile=False, multithreaded=False):
-        if PYQT5:
-            SpyderPluginWidget.__init__(self, parent, main = parent)
-        else:
-            SpyderPluginWidget.__init__(self, parent)
-        
+        SpyderPluginWidget.__init__(self, parent)
+
         debug_print("    ..internal console: initializing")
         self.dialog_manager = DialogManager()
 
@@ -81,7 +80,11 @@ class Console(SpyderPluginWidget):
         self.register_widget_shortcuts(self.find_widget)
 
         # Main layout
-        layout = QVBoxLayout()
+        btn_layout = QHBoxLayout()
+        btn_layout.setAlignment(Qt.AlignLeft)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.options_button, Qt.AlignRight)
+        layout = create_plugin_layout(btn_layout)
         layout.addWidget(self.shell)
         layout.addWidget(self.find_widget)
         self.setLayout(layout)
@@ -91,7 +94,12 @@ class Console(SpyderPluginWidget):
             
         # Accepting drops
         self.setAcceptDrops(True)
-        
+
+        # Traceback MessageBox
+        self.error_dlg = None
+        self.error_traceback = ""
+        self.dismiss_error = False
+
     #------ Private API --------------------------------------------------------
     def set_historylog(self, historylog):
         """Bind historylog instance to this console
@@ -183,11 +191,9 @@ class Console(SpyderPluginWidget):
                                   codecompenter_action, exteditor_action))
                     
         plugin_actions = [None, run_action, environ_action, syspath_action,
-                          option_menu, None, quit_action]
-        
-        # Add actions to context menu
-        add_actions(self.shell.menu, plugin_actions)
-        
+                          option_menu, MENU_SEPARATOR, quit_action,
+                          self.undock_action]
+
         return plugin_actions
     
     def register_plugin(self):
@@ -195,15 +201,40 @@ class Console(SpyderPluginWidget):
         self.focus_changed.connect(self.main.plugin_focus_changed)
         self.main.add_dockwidget(self)
         # Connecting the following signal once the dockwidget has been created:
-        self.shell.traceback_available.connect(self.traceback_available)
+        self.shell.exception_occurred.connect(self.exception_occurred)
     
-    def traceback_available(self):
-        """Traceback is available in the internal console: showing the 
-        internal console automatically to warn the user"""
-        if CONF.get('main', 'show_internal_console_if_traceback', False):
+    def exception_occurred(self, text, is_traceback):
+        """
+        Exception ocurred in the internal console.
+
+        Show a QDialog or the internal console to warn the user.
+        """
+        # Skip errors without traceback or dismiss
+        if (not is_traceback and self.error_dlg is None) or self.dismiss_error:
+            return
+
+        if CONF.get('main', 'show_internal_errors'):
+            if self.error_dlg is None:
+                self.error_dlg = SpyderErrorDialog(self)
+                self.error_dlg.close_btn.clicked.connect(self.close_error_dlg)
+                self.error_dlg.rejected.connect(self.remove_error_dlg)
+                self.error_dlg.details.go_to_error.connect(self.go_to_error)
+                self.error_dlg.show()
+            self.error_dlg.append_traceback(text)
+        elif DEV:
             self.dockwidget.show()
             self.dockwidget.raise_()
-        
+
+    def close_error_dlg(self):
+        """Close error dialog."""
+        if self.error_dlg.dismiss_box.isChecked():
+            self.dismiss_error = True
+        self.error_dlg.reject()
+
+    def remove_error_dlg(self):
+        """Remove error dialog."""
+        self.error_dlg = None
+
     #------ Public API ---------------------------------------------------------
     @Slot()
     def quit(self):
@@ -229,8 +260,9 @@ class Console(SpyderPluginWidget):
         """Run a Python script"""
         if filename is None:
             self.shell.interpreter.restore_stds()
-            filename, _selfilter = getopenfilename(self, _("Run Python script"),
-                   getcwd(), _("Python scripts")+" (*.py ; *.pyw ; *.ipy)")
+            filename, _selfilter = getopenfilename(
+                    self, _("Run Python script"), getcwd_or_home(),
+                    _("Python scripts")+" (*.py ; *.pyw ; *.ipy)")
             self.shell.interpreter.redirect_stds()
             if filename:
                 os.chdir( osp.dirname(filename) )
@@ -275,7 +307,7 @@ class Console(SpyderPluginWidget):
     @Slot()
     def change_max_line_count(self):
         "Change maximum line count"""
-        mlc, valid = QInputDialog.getInteger(self, _('Buffer'),
+        mlc, valid = QInputDialog.getInt(self, _('Buffer'),
                                            _('Maximum line count'),
                                            self.get_option('max_line_count'),
                                            0, 1000000)

@@ -13,7 +13,6 @@ import socket
 import sys
 
 # Third party imports
-from qtpy import PYQT5
 from qtpy.QtCore import QThread, QUrl, Signal, Slot
 from qtpy.QtWidgets import (QActionGroup, QComboBox, QGroupBox, QHBoxLayout,
                             QLabel, QLineEdit, QMenu, QMessageBox, QSizePolicy,
@@ -24,19 +23,18 @@ from qtpy.QtWebEngineWidgets import QWebEnginePage, WEBENGINE
 from spyder import dependencies
 from spyder.config.base import _, get_conf_path, get_module_source_path
 from spyder.config.fonts import DEFAULT_SMALL_DELTA
-from spyder.config.ipython import QTCONSOLE_INSTALLED
-from spyder.plugins import SpyderPluginWidget
-from spyder.plugins.configdialog import PluginConfigPage
+from spyder.api.plugins import SpyderPluginWidget
+from spyder.api.preferences import PluginConfigPage
 from spyder.py3compat import get_meth_class_inst, to_text_string
 from spyder.utils import icon_manager as ima
 from spyder.utils import programs
 from spyder.utils.help.sphinxify import (CSS_PATH, generate_context,
                                          sphinxify, usage, warning)
 from spyder.utils.qthelpers import (add_actions, create_action,
-                                    create_toolbutton)
+                                    create_toolbutton, create_plugin_layout,
+                                    MENU_SEPARATOR)
 from spyder.widgets.browser import FrameWebView
 from spyder.widgets.comboboxes import EditableComboBox
-from spyder.widgets.externalshell.pythonshell import ExtPythonShellWidget
 from spyder.widgets.findreplace import FindReplace
 from spyder.widgets.sourcecode import codeeditor
 
@@ -46,13 +44,6 @@ dependencies.add("sphinx", _("Show help for objects in the Editor and "
                              "Consoles in a dedicated pane"),
                  required_version='>=0.6.6')
 
-
-#XXX: Hardcoded dependency on optional IPython plugin component
-#     that requires the hack to make this work without IPython
-if QTCONSOLE_INSTALLED:
-    from spyder.widgets.ipython import IPythonControlWidget
-else:
-    IPythonControlWidget = None  # analysis:ignore
 
 
 class ObjectComboBox(EditableComboBox):
@@ -74,7 +65,7 @@ class ObjectComboBox(EditableComboBox):
             return True
         if qstr is None:
             qstr = self.currentText()
-        if not re.search('^[a-zA-Z0-9_\.]*$', str(qstr), 0):
+        if not re.search(r'^[a-zA-Z0-9_\.]*$', str(qstr), 0):
             return False
         objtxt = to_text_string(qstr)
         if self.help.get_option('automatic_import'):
@@ -131,16 +122,12 @@ class HelpConfigPage(PluginConfigPage):
             editor_tip = _("This feature requires the Rope or Jedi libraries.\n"
                            "It seems you don't have either installed.")
             editor_box.setToolTip(editor_tip)
-        python_box = self.create_checkbox(_("Python Console"),
-                                          'connect/python_console')
         ipython_box = self.create_checkbox(_("IPython Console"),
                                            'connect/ipython_console')
-        ipython_box.setEnabled(QTCONSOLE_INSTALLED)
 
         connections_layout = QVBoxLayout()
         connections_layout.addWidget(connections_label)
         connections_layout.addWidget(editor_box)
-        connections_layout.addWidget(python_box)
         connections_layout.addWidget(ipython_box)
         connections_group.setLayout(connections_layout)
 
@@ -313,9 +300,12 @@ class SphinxThread(QThread):
                                                img_path=self.img_path)
                     html_text = sphinxify(doc['docstring'], context)
                     if doc['docstring'] == '':
-                        html_text += '<div class="hr"></div>'
-                        html_text += self.html_text_no_doc
-
+                        if any([doc['name'], doc['argspec'], doc['note']]):
+                            msg = _("No further documentation available")
+                            html_text += '<div class="hr"></div>'
+                        else:
+                            msg = _("No documentation available")
+                        html_text += '<div id="doc-warning">%s</div>' % msg
                 except Exception as error:
                     self.error_msg.emit(to_text_string(error))
                     return
@@ -340,18 +330,18 @@ class Help(SpyderPluginWidget):
     # Signals
     focus_changed = Signal()
 
-    def __init__(self, parent):
-        if PYQT5:
-            SpyderPluginWidget.__init__(self, parent, main = parent)
-        else:
-            SpyderPluginWidget.__init__(self, parent)
+    def __init__(self, parent=None):
+        SpyderPluginWidget.__init__(self, parent)
 
         self.internal_shell = None
+        self.console = None
+        self.ipyconsole = None
+        self.editor = None
 
         # Initialize plugin
         self.initialize_plugin()
 
-        self.no_doc_string = _("No further documentation available")
+        self.no_doc_string = _("No documentation available")
 
         self._last_console_cb = None
         self._last_editor_cb = None
@@ -373,8 +363,6 @@ class Help(SpyderPluginWidget):
         self.set_rich_text_font(self.get_plugin_font('rich_text'))
 
         self.shell = None
-
-        self.external_console = None
 
         # locked = disable link with Console
         self.locked = False
@@ -443,15 +431,13 @@ class Help(SpyderPluginWidget):
         self._update_lock_icon()
 
         # Option menu
-        options_button = create_toolbutton(self, text=_('Options'),
-                                           icon=ima.icon('tooloptions'))
-        options_button.setPopupMode(QToolButton.InstantPopup)
-        menu = QMenu(self)
-        add_actions(menu, [self.rich_text_action, self.plain_text_action,
-                           self.show_source_action, None,
-                           self.auto_import_action])
-        options_button.setMenu(menu)
-        layout_edit.addWidget(options_button)
+        self.menu = QMenu(self)
+        add_actions(self.menu, [self.rich_text_action, self.plain_text_action,
+                                self.show_source_action, MENU_SEPARATOR,
+                                self.auto_import_action, MENU_SEPARATOR,
+                                self.undock_action])
+        self.options_button.setMenu(self.menu)
+        layout_edit.addWidget(self.options_button)
 
         if self.rich_help:
             self.switch_to_rich_text()
@@ -462,9 +448,8 @@ class Help(SpyderPluginWidget):
         self.source_changed()
 
         # Main layout
-        layout = QVBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addLayout(layout_edit)
+        layout = create_plugin_layout(layout_edit)
+        # we have two main widgets, but only one of them is shown at a time
         layout.addWidget(self.plain_text)
         layout.addWidget(self.rich_text)
         self.setLayout(layout)
@@ -514,7 +499,11 @@ class Help(SpyderPluginWidget):
         self.focus_changed.connect(self.main.plugin_focus_changed)
         self.main.add_dockwidget(self)
         self.main.console.set_help(self)
+
         self.internal_shell = self.main.console.shell
+        self.console = self.main.console
+        self.ipyconsole = self.main.ipyconsole
+        self.editor = self.main.editor
 
     def closing_plugin(self, cancelable=False):
         """Perform actions before parent main window is closed"""
@@ -555,10 +544,8 @@ class Help(SpyderPluginWidget):
             self.toggle_math_mode(math_o)
 
         # To make auto-connection changes take place instantly
-        self.main.editor.apply_plugin_settings(options=[connect_n])
-        self.main.extconsole.apply_plugin_settings(options=[connect_n])
-        if self.main.ipyconsole is not None:
-            self.main.ipyconsole.apply_plugin_settings(options=[connect_n])
+        self.editor.apply_plugin_settings(options=[connect_n])
+        self.ipyconsole.apply_plugin_settings(options=[connect_n])
 
     #------ Public API (related to Help's source) -------------------------
     def source_is_console(self):
@@ -747,6 +734,10 @@ class Help(SpyderPluginWidget):
 
     @Slot()
     def show_tutorial(self):
+        """Show the Spyder tutorial in the Help plugin, opening it if needed"""
+        if not self.dockwidget.isVisible():
+            self.dockwidget.show()
+            self.toggle_view_action.setChecked(True)
         tutorial_path = get_module_source_path('spyder.utils.help')
         tutorial = osp.join(tutorial_path, 'tutorial.rst')
         text = open(tutorial).read()
@@ -762,9 +753,6 @@ class Help(SpyderPluginWidget):
             self.rich_text.webview.load(QUrl(url))
 
     #------ Public API ---------------------------------------------------------
-    def set_external_console(self, external_console):
-        self.external_console = external_console
-
     def force_refresh(self):
         if self.source_is_console():
             self.set_object_text(None, force_refresh=True)
@@ -823,13 +811,13 @@ class Help(SpyderPluginWidget):
         index = self.source_combo.currentIndex()
         if hasattr(self.main, 'tabifiedDockWidgets'):
             # 'QMainWindow.tabifiedDockWidgets' was introduced in PyQt 4.5
-            if self.dockwidget and (force or self.dockwidget.isVisible()) \
-               and not self.ismaximized \
-               and (force or text != self._last_texts[index]):
+            if (self.dockwidget and (force or self.dockwidget.isVisible()) and
+                    not self.ismaximized and
+                    (force or text != self._last_texts[index])):
                 dockwidgets = self.main.tabifiedDockWidgets(self.dockwidget)
-                if self.main.console.dockwidget not in dockwidgets and \
-                   (hasattr(self.main, 'extconsole') and \
-                    self.main.extconsole.dockwidget not in dockwidgets):
+                if (self.console.dockwidget not in dockwidgets and
+                        self.ipyconsole is not None and
+                        self.ipyconsole.dockwidget not in dockwidgets):
                     self.dockwidget.show()
                     self.dockwidget.raise_()
         self._last_texts[index] = text
@@ -900,23 +888,21 @@ class Help(SpyderPluginWidget):
 
     def set_shell(self, shell):
         """Bind to shell"""
-        if IPythonControlWidget is not None:
-            # XXX(anatoli): hack to make Spyder run on systems without IPython
-            #               there should be a better way
-            if isinstance(shell, IPythonControlWidget):
-                # XXX: this ignores passed argument completely
-                self.shell = self.external_console.get_current_shell()
-        else:
-            self.shell = shell
+        self.shell = shell
 
     def get_shell(self):
-        """Return shell which is currently bound to Help,
-        or another running shell if it has been terminated"""
-        if not isinstance(self.shell, ExtPythonShellWidget) \
-           or not self.shell.externalshell.is_running():
+        """
+        Return shell which is currently bound to Help,
+        or another running shell if it has been terminated
+        """
+        if (not hasattr(self.shell, 'get_doc') or
+                (hasattr(self.shell, 'is_running') and
+                 not self.shell.is_running())):
             self.shell = None
-            if self.external_console is not None:
-                self.shell = self.external_console.get_running_python_shell()
+            if self.ipyconsole is not None:
+                shell = self.ipyconsole.get_current_shellwidget()
+                if shell is not None and shell.kernel_client is not None:
+                    self.shell = shell
             if self.shell is None:
                 self.shell = self.internal_shell
         return self.shell
@@ -924,8 +910,11 @@ class Help(SpyderPluginWidget):
     def render_sphinx_doc(self, doc, context=None):
         """Transform doc string dictionary to HTML and show it"""
         # Math rendering option could have changed
-        fname = self.parent().parent().editor.get_current_filename()
-        dname = osp.dirname(fname)
+        if self.editor is not None:
+            fname = self.editor.get_current_filename()
+            dname = osp.dirname(fname)
+        else:
+            dname = ''
         self._sphinx_thread.render(doc, context, self.get_option('math'),
                                    dname)
 
@@ -955,7 +944,7 @@ class Help(SpyderPluginWidget):
         obj_text = to_text_string(obj_text)
 
         if not shell.is_defined(obj_text):
-            if self.get_option('automatic_import') and\
+            if self.get_option('automatic_import') and \
                self.internal_shell.is_defined(obj_text, force_import=True):
                 shell = self.internal_shell
             else:

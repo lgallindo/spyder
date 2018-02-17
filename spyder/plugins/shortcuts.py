@@ -16,7 +16,7 @@ import sys
 from qtpy import PYQT5
 from qtpy.compat import from_qvariant, to_qvariant
 from qtpy.QtCore import (QAbstractTableModel, QModelIndex, QRegExp,
-                         QSortFilterProxyModel, Qt)
+                         QSortFilterProxyModel, Qt, Slot)
 from qtpy.QtGui import (QKeySequence, QRegExpValidator)
 from qtpy.QtWidgets import (QAbstractItemView, QApplication, QDialog,
                             QDialogButtonBox, QGridLayout, QHBoxLayout, QLabel,
@@ -59,7 +59,19 @@ VALID_KEYS = [getattr(Qt, 'Key_{0}'.format(k)) for k in KEYSTRINGS+SINGLE_KEYS]
 
 # Valid finder chars. To be improved
 VALID_ACCENT_CHARS = "ÁÉÍOÚáéíúóàèìòùÀÈÌÒÙâêîôûÂÊÎÔÛäëïöüÄËÏÖÜñÑ"
-VALID_FINDER_CHARS = "[A-Za-z\s{0}]".format(VALID_ACCENT_CHARS)
+VALID_FINDER_CHARS = r"[A-Za-z\s{0}]".format(VALID_ACCENT_CHARS)
+
+BLACKLIST = {
+    'Shift+Del': _('Currently used to delete lines on editor/Cut a word'),
+    'Shift+Ins': _('Currently used to paste a word')
+}
+
+if os.name == 'nt':
+    BLACKLIST['Alt+Backspace'] = _('We cannot support this '
+                                   'shortcut on Windows')
+
+BLACKLIST['Shift'] = _('Shortcuts that use Shift and another key'
+                       ' are unsupported')
 
 
 class CustomLineEdit(QLineEdit):
@@ -112,7 +124,8 @@ class ShortcutFinder(QLineEdit):
 
 
 # Error codes for the shortcut editor dialog
-NO_WARNING, SEQUENCE_LENGTH, SEQUENCE_CONFLICT, INVALID_KEY = [0, 1, 2, 3]
+(NO_WARNING, SEQUENCE_LENGTH, SEQUENCE_CONFLICT,
+ INVALID_KEY, IN_BLACKLIST, SHIFT_BLACKLIST) = [0, 1, 2, 3, 4, 5]
 
 
 class ShortcutEditor(QDialog):
@@ -190,6 +203,24 @@ class ShortcutEditor(QDialog):
         # Signals
         bbox.accepted.connect(self.accept)
         bbox.rejected.connect(self.reject)
+
+    @Slot()
+    def reject(self):
+        """Slot for rejected signal."""
+        # Added for issue #5426.  Due to the focusPolicy of Qt.NoFocus for the
+        # buttons, if the cancel button was clicked without first setting focus
+        # to the button, it would cause a seg fault crash.
+        self.button_cancel.setFocus()
+        super(ShortcutEditor, self).reject()
+
+    @Slot()
+    def accept(self):
+        """Slot for accepted signal."""
+        # Added for issue #5426.  Due to the focusPolicy of Qt.NoFocus for the
+        # buttons, if the ok button was clicked without first setting focus to
+        # the button, it would cause a seg fault crash.
+        self.button_ok.setFocus()
+        super(ShortcutEditor, self).accept()
 
     def keyPressEvent(self, e):
         """Qt override."""
@@ -310,11 +341,29 @@ class ShortcutEditor(QDialog):
             tip = 'This shortcut is correct!'
         elif warning_type == SEQUENCE_CONFLICT:
             template = '<i>{0}<b>{1}</b></i>'
-            tip_title = _('The new shorcut conflicts with:') + '<br>'
+            tip_title = _('The new shortcut conflicts with:') + '<br>'
             tip_body = ''
             for s in conflicts:
                 tip_body += ' - {0}: {1}<br>'.format(s.context, s.name)
             tip_body = tip_body[:-4]  # Removing last <br>
+            tip = template.format(tip_title, tip_body)
+            warn = True
+        elif warning_type == IN_BLACKLIST:
+            template = '<i>{0}<b>{1}</b></i>'
+            tip_title = _('Forbidden key sequence!') + '<br>'
+            tip_body = ''
+            use = BLACKLIST[self.new_sequence]
+            if use is not None:
+                tip_body = use
+            tip = template.format(tip_title, tip_body)
+            warn = True
+        elif warning_type == SHIFT_BLACKLIST:
+            template = '<i>{0}<b>{1}</b></i>'
+            tip_title = _('Forbidden key sequence!') + '<br>'
+            tip_body = ''
+            use = BLACKLIST['Shift']
+            if use is not None:
+                tip_body = use
             tip = template.format(tip_title, tip_body)
             warn = True
         elif warning_type == SEQUENCE_LENGTH:
@@ -365,8 +414,14 @@ class ShortcutEditor(QDialog):
         self.new_sequence = sequence
 
         conflicts = self.check_conflicts()
+        blacklist = self.new_sequence in BLACKLIST
+        individual_keys = self.new_sequence.split('+')
         if conflicts and different_sequence:
             warning_type = SEQUENCE_CONFLICT
+        elif blacklist:
+            warning_type = IN_BLACKLIST
+        elif len(individual_keys) == 2 and individual_keys[0] == 'Shift':
+            warning_type = SHIFT_BLACKLIST
         else:
             warning_type = NO_WARNING
 
@@ -392,10 +447,9 @@ class ShortcutEditor(QDialog):
         self.key_text = [k.upper() for k in self.key_text]
 
         # Fix Backtab, Tab issue
-        if os.name == 'nt':
-            if Qt.Key_Backtab in self.key_non_modifiers:
-                idx = self.key_non_modifiers.index(Qt.Key_Backtab)
-                self.key_non_modifiers[idx] = Qt.Key_Tab
+        if Qt.Key_Backtab in self.key_non_modifiers:
+            idx = self.key_non_modifiers.index(Qt.Key_Backtab)
+            self.key_non_modifiers[idx] = Qt.Key_Tab
 
         if len(self.key_modifiers) == 0:
             # Filter single key allowed
@@ -584,7 +638,7 @@ class CustomSortFilterProxy(QSortFilterProxyModel):
     def __init__(self, parent=None):
         super(CustomSortFilterProxy, self).__init__(parent)
         self._parent = parent
-        self.pattern = re.compile(u'')
+        self.pattern = re.compile(r'')
 
     def set_filter(self, text):
         """Set regular expression for filter."""
@@ -654,6 +708,7 @@ class ShortcutsTable(QTableView):
 
     def adjust_cells(self):
         """Adjust column size based on contents."""
+        self.resizeRowsToContents()
         self.resizeColumnsToContents()
         fm = self.horizontalHeader().fontMetrics()
         names = [fm.width(s.name + ' '*9) for s in self.source_model.shortcuts]
@@ -818,6 +873,13 @@ class ShortcutsConfigPage(GeneralConfigPage):
         self.table.check_shortcuts()
 
     def reset_to_default(self):
+        """Reset to default values of the shortcuts making a confirmation."""
+        reset = QMessageBox.warning(self, _("Shortcuts reset"),
+                                    _("Do you want to reset "
+                                      "to default values?"),
+                                    QMessageBox.Yes | QMessageBox.No)
+        if reset == QMessageBox.No:
+            return
         reset_shortcuts()
         self.main.apply_shortcuts()
         self.table.load_shortcuts()
@@ -835,7 +897,7 @@ def test():
     table = ShortcutsTable()
     table.show()
     app.exec_()
-    print([str(s) for s in table.source_model.shortcuts])
+    print([str(s) for s in table.source_model.shortcuts])  # spyder: test-skip
     table.check_shortcuts()
 
 if __name__ == '__main__':

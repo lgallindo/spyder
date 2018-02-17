@@ -12,6 +12,9 @@ import os.path as osp
 import sys
 import stat
 
+from spyder.py3compat import is_text_string, getcwd
+from spyder.config.base import get_home_dir, debug_print
+
 
 def __remove_pyc_pyo(fname):
     """Eventually remove .pyc and .pyo files associated to a Python script"""
@@ -19,6 +22,7 @@ def __remove_pyc_pyo(fname):
         for ending in ('c', 'o'):
             if osp.exists(fname+ending):
                 os.remove(fname+ending)
+
 
 def rename_file(source, dest):
     """
@@ -28,6 +32,7 @@ def rename_file(source, dest):
     os.rename(source, dest)
     __remove_pyc_pyo(source)
 
+
 def remove_file(fname):
     """
     Remove file *fname*
@@ -35,6 +40,7 @@ def remove_file(fname):
     """
     os.remove(fname)
     __remove_pyc_pyo(fname)
+
 
 def move_file(source, dest):
     """
@@ -155,6 +161,7 @@ def remove_backslashes(path):
             path = path[:-1]
         # Replacing backslashes by slashes
         path = path.replace('\\', '/')
+        path = path.replace('/\'', '\\\'')
     return path
 
 
@@ -192,7 +199,7 @@ def monkeypatch_method(cls, patch_name):
         if old_func is not None:
             # Add the old func to a list of old funcs.
             old_ref = "_old_%s_%s" % (patch_name, fname)
-            #print old_ref, old_func
+
             old_attr = getattr(cls, old_ref, None)
             if old_attr is None:
                 setattr(cls, old_ref, old_func)
@@ -229,6 +236,33 @@ def get_common_path(pathlist):
                 return osp.abspath(common)
 
 
+def add_pathlist_to_PYTHONPATH(env, pathlist, drop_env=False,
+                               ipyconsole=False):
+    # PyQt API 1/2 compatibility-related tests:
+    assert isinstance(env, list)
+    assert all([is_text_string(path) for path in env])
+    
+    pypath = "PYTHONPATH"
+    pathstr = os.pathsep.join(pathlist)
+    if os.environ.get(pypath) is not None and not drop_env:
+        old_pypath = os.environ[pypath]
+        if not ipyconsole:
+            for index, var in enumerate(env[:]):
+                if var.startswith(pypath+'='):
+                    env[index] = var.replace(pypath+'=',
+                                             pypath+'='+pathstr+os.pathsep)
+            env.append('OLD_PYTHONPATH='+old_pypath)
+        else:
+            pypath =  {'PYTHONPATH': pathstr + os.pathsep + old_pypath,
+                       'OLD_PYTHONPATH': old_pypath}
+            return pypath
+    else:
+        if not ipyconsole:
+            env.append(pypath+'='+pathstr)
+        else:
+            return {'PYTHONPATH': pathstr}
+
+
 def memoize(obj):
     """
     Memoize objects to trade memory for execution speed
@@ -251,18 +285,16 @@ def memoize(obj):
         return cache[key]
     return memoizer
 
-if __name__ == '__main__':
-    if os.name == 'nt':
-        assert get_common_path([
-                                'D:\\Python\\spyder-v21\\spyder\\widgets',
-                                'D:\\Python\\spyder\\spyder\\utils',
-                                'D:\\Python\\spyder\\spyder\\widgets',
-                                'D:\\Python\\spyder-v21\\spyder\\utils',
-                                ]) == 'D:\\Python'
-    else:
-        assert get_common_path([
-                                '/Python/spyder-v21/spyder.widgets',
-                                '/Python/spyder/spyder.utils',
-                                '/Python/spyder/spyder.widgets',
-                                '/Python/spyder-v21/spyder.utils',
-                                ]) == '/Python'
+
+def getcwd_or_home():
+    """Safe version of getcwd that will fallback to home user dir.
+
+    This will catch the error raised when the current working directory
+    was removed for an external program.
+    """
+    try:
+        return getcwd()
+    except OSError:
+        debug_print("WARNING: Current working directory was deleted, "
+                    "falling back to home dirertory")
+        return get_home_dir()

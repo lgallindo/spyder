@@ -14,26 +14,32 @@ IPython console plugin.
 # Standard library imports
 from xml.sax.saxutils import escape
 import os
+import os.path as osp
 import re
 import sre_constants
 import textwrap
 
 # Third party imports
-from qtpy.QtCore import QPoint, QRegExp, Qt
+from qtpy.QtCore import QPoint, Qt
 from qtpy.QtGui import QCursor, QTextCursor, QTextDocument
 from qtpy.QtWidgets import QApplication, QToolTip
+from qtpy import QT_VERSION
 
 # Local imports
 from spyder.config.base import _
-from spyder.py3compat import is_text_string, to_text_string, u
-from spyder.utils import encoding, sourcecode
+from spyder.py3compat import is_text_string, to_text_string
+from spyder.utils import encoding, sourcecode, programs
 from spyder.utils.dochelpers import (getargspecfromtext, getobj,
                                      getsignaturefromtext)
 from spyder.utils.misc import get_error_match
 from spyder.widgets.arraybuilder import NumpyArrayDialog
 
+QT55_VERSION = programs.check_version(QT_VERSION, "5.5", ">=")
 
-HISTORY_FILENAMES = []
+if QT55_VERSION:
+    from qtpy.QtCore import QRegularExpression
+else:
+    from qtpy.QtCore import QRegExp
 
 
 class BaseEditMixin(object):
@@ -48,6 +54,16 @@ class BaseEditMixin(object):
         # Implemented in CodeEditor, but needed for calltip/completion widgets
         return 0
     
+
+    def calculate_real_position(self, point):
+        """
+        Add offset to a point, to take into account the Editor panels.
+
+        This is reimplemented in CodeEditor, in other widgets it returns
+        the same point.
+        """
+        return point
+
     
     #------Calltips
     def _format_signature(self, text):
@@ -105,7 +121,7 @@ class BaseEditMixin(object):
             cursor = QTextCursor(self.document().findBlockByNumber(at_line-1))
             cy = self.cursorRect(cursor).top()
         point = self.mapToGlobal(QPoint(cx, cy))
-        point.setX(point.x()+self.get_linenumberarea_width())
+        point = self.calculate_real_position(point)
         point.setY(point.y()+font.pointSize()+5)
         if signature:
             self.calltip_widget.show_tip(point, tiptext, wrapped_textlines)
@@ -119,9 +135,12 @@ class BaseEditMixin(object):
         if not is_text_string(text): # testing for QString (PyQt API#1)
             text = to_text_string(text)
         eol_chars = sourcecode.get_eol_chars(text)
-        if eol_chars is not None and self.eol_chars is not None:
-            self.document().setModified(True)
+        is_document_modified = eol_chars is not None and self.eol_chars is not None
         self.eol_chars = eol_chars
+        if is_document_modified:
+            self.document().setModified(True)
+            if self.sig_eol_chars_changed is not None:
+                self.sig_eol_chars_changed.emit(eol_chars)
         
     def get_line_separator(self):
         """Return line separator based on current EOL mode"""
@@ -288,13 +307,13 @@ class BaseEditMixin(object):
         if text and not all_text:
             while text.endswith("\n"):
                 text = text[:-1]
-            while text.endswith(u("\u2029")):
+            while text.endswith(u"\u2029"):
                 text = text[:-1]
         return text
     
-    def get_character(self, position):
-        """Return character at *position*"""
-        position = self.get_position(position)
+    def get_character(self, position, offset=0):
+        """Return character at *position* with the given offset."""
+        position = self.get_position(position) + offset
         cursor = self.textCursor()
         cursor.movePosition(QTextCursor.End)
         if position < cursor.position():
@@ -348,7 +367,8 @@ class BaseEditMixin(object):
 
         cursor.select(QTextCursor.WordUnderCursor)
         text = to_text_string(cursor.selectedText())
-        match = re.findall(r'([a-zA-Z\_]+[0-9a-zA-Z\_]*)', text)
+        # find a valid python variable name
+        match = re.findall(r'([^\d\W]\w*)', text, re.UNICODE)
         if match:
             return match[0]
     
@@ -371,7 +391,7 @@ class BaseEditMixin(object):
         """Return line at *coordinates* (QPoint)"""
         cursor = self.cursorForPosition(coordinates)
         cursor.select(QTextCursor.BlockUnderCursor)
-        return to_text_string(cursor.selectedText()).replace(u('\u2029'), '')
+        return to_text_string(cursor.selectedText()).replace(u'\u2029', '')
     
     def get_word_at(self, coordinates):
         """Return word at *coordinates* (QPoint)"""
@@ -382,6 +402,7 @@ class BaseEditMixin(object):
     def get_block_indentation(self, block_nb):
         """Return line indentation (character number)"""
         text = to_text_string(self.document().findBlockByNumber(block_nb).text())
+        text = text.replace("\t", " "*self.tab_stop_width_spaces)
         return len(text)-len(text.lstrip())
     
     def get_selection_bounds(self):
@@ -405,7 +426,7 @@ class BaseEditMixin(object):
         Replace the unicode line separator character \u2029 by 
         the line separator characters returned by get_line_separator
         """
-        return to_text_string(self.textCursor().selectedText()).replace(u("\u2029"),
+        return to_text_string(self.textCursor().selectedText()).replace(u"\u2029",
                                                      self.get_line_separator())
     
     def remove_selected_text(self):
@@ -466,6 +487,8 @@ class BaseEditMixin(object):
         findflag = QTextDocument.FindFlag()
         if not forward:
             findflag = findflag | QTextDocument.FindBackward
+        if case:
+            findflag = findflag | QTextDocument.FindCaseSensitively
         moves = [QTextCursor.NoMove]
         if forward:
             moves += [QTextCursor.NextWord, QTextCursor.Start]
@@ -480,9 +503,17 @@ class BaseEditMixin(object):
             moves += [QTextCursor.End]
         if not regexp:
             text = re.escape(to_text_string(text))
-        pattern = QRegExp(r"\b%s\b" % text if words else text,
-                          Qt.CaseSensitive if case else Qt.CaseInsensitive,
-                          QRegExp.RegExp2)
+        if QT55_VERSION:
+            pattern = QRegularExpression(r"\b{}\b".format(text) if words else
+                                         text)
+            if case:
+                pattern.setPatternOptions(
+                    QRegularExpression.CaseInsensitiveOption)
+        else:
+            pattern = QRegExp(r"\b{}\b".format(text)
+                              if words else text, Qt.CaseSensitive if case else
+                              Qt.CaseInsensitive, QRegExp.RegExp2)
+
         for move in moves:
             cursor.movePosition(move)
             if regexp and '\\n' in text:
@@ -502,6 +533,36 @@ class BaseEditMixin(object):
         """Needs to be overloaded in the codeeditor where it will be True"""
         return False
 
+    def get_number_matches(self, pattern, source_text='', case=False):
+        """Get the number of matches for the searched text."""
+        pattern = to_text_string(pattern)
+        if not pattern:
+            return 0
+        if not source_text:
+            source_text = to_text_string(self.toPlainText())
+        try:
+            if case:
+                regobj = re.compile(pattern)
+            else:
+                regobj = re.compile(pattern, re.IGNORECASE)
+        except sre_constants.error:
+            return
+
+        number_matches = 0
+        for match in regobj.finditer(source_text):
+            number_matches += 1
+
+        return number_matches
+
+    def get_match_number(self, pattern, case=False):
+        """Get number of the match for the searched text."""
+        position = self.textCursor().position()
+        source_text = self.get_text(position_from='sof', position_to=position)
+        match_number = self.get_number_matches(pattern,
+                                               source_text=source_text,
+                                               case=case)
+        return match_number
+
     # --- Numpy matrix/array helper / See 'spyder/widgets/arraybuilder.py'
     def enter_array_inline(self):
         """ """
@@ -519,11 +580,12 @@ class BaseEditMixin(object):
 
         # TODO: adapt to font size
         x = rect.left()
-        x = x + self.get_linenumberarea_width() - 14
+        x = x - 14
         y = rect.top() + (rect.bottom() - rect.top())/2
         y = y - dlg.height()/2 - 3
 
         pos = QPoint(x, y)
+        pos = self.calculate_real_position(pos)
         dlg.move(self.mapToGlobal(pos))
 
         # called from editor
@@ -592,7 +654,6 @@ class GetHelpMixin(object):
     def set_help(self, help_plugin):
         """Set Help DockWidget reference"""
         self.help = help_plugin
-        self.help.set_shell(self)
 
     def set_help_enabled(self, state):
         self.help_enabled = state
@@ -612,7 +673,7 @@ class GetHelpMixin(object):
 
     def show_object_info(self, text, call=False, force=False):
         """Show signature calltip and/or docstring in the Help plugin"""
-        text = to_text_string(text) # Useful only for ExternalShellBase
+        text = to_text_string(text)
 
         # Show docstring
         help_enabled = self.help_enabled or force
@@ -622,7 +683,10 @@ class GetHelpMixin(object):
         if help_enabled and (self.help is not None) and \
            (self.help.dockwidget.isVisible()):
             # Help widget exists and is visible
-            self.help.set_shell(self)
+            if hasattr(self, 'get_doc'):
+                self.help.set_shell(self)
+            else:
+                self.help.set_shell(self.parent())
             self.help.set_object_text(text, ignore_unknown=False)
             self.setFocus() # if help was not at top level, raising it to
                             # top will automatically give it focus because of
@@ -670,11 +734,19 @@ class SaveHistoryMixin(object):
     
     INITHISTORY = None
     SEPARATOR = None
+    HISTORY_FILENAMES = []
+
     append_to_history = None
     
-    def __init__(self):
-        pass
-    
+    def __init__(self, history_filename=''):
+        self.history_filename = history_filename
+        self.create_history_filename()
+
+    def create_history_filename(self):
+        """Create history_filename with INITHISTORY if it doesn't exist."""
+        if self.history_filename and not osp.isfile(self.history_filename):
+            encoding.writelines(self.INITHISTORY, self.history_filename)
+
     def add_to_history(self, command):
         """Add command to history"""
         command = to_text_string(command)
@@ -683,17 +755,80 @@ class SaveHistoryMixin(object):
         if command.endswith('\n'):
             command = command[:-1]
         self.histidx = None
-        if len(self.history)>0 and self.history[-1] == command:
+        if len(self.history) > 0 and self.history[-1] == command:
             return
         self.history.append(command)
         text = os.linesep + command
         
         # When the first entry will be written in history file,
         # the separator will be append first:
-        if self.history_filename not in HISTORY_FILENAMES:
-            HISTORY_FILENAMES.append(self.history_filename)
+        if self.history_filename not in self.HISTORY_FILENAMES:
+            self.HISTORY_FILENAMES.append(self.history_filename)
             text = self.SEPARATOR + text
-        
-        encoding.write(text, self.history_filename, mode='ab')
+        # Needed to prevent errors when writing history to disk
+        # See issue 6431
+        try:
+            encoding.write(text, self.history_filename, mode='ab')
+        except (IOError, OSError):
+            pass
         if self.append_to_history is not None:
             self.append_to_history.emit(self.history_filename, text)
+
+
+class BrowseHistoryMixin(object):
+
+    def __init__(self):
+        self.history = []
+        self.histidx = None
+        self.hist_wholeline = False
+
+    def clear_line(self):
+        """Clear current line (without clearing console prompt)"""
+        self.remove_text(self.current_prompt_pos, 'eof')
+
+    def browse_history(self, backward):
+        """Browse history"""
+        if self.is_cursor_before('eol') and self.hist_wholeline:
+            self.hist_wholeline = False
+        tocursor = self.get_current_line_to_cursor()
+        text, self.histidx = self.find_in_history(tocursor, self.histidx,
+                                                  backward)
+        if text is not None:
+            if self.hist_wholeline:
+                self.clear_line()
+                self.insert_text(text)
+            else:
+                cursor_position = self.get_position('cursor')
+                # Removing text from cursor to the end of the line
+                self.remove_text('cursor', 'eol')
+                # Inserting history text
+                self.insert_text(text)
+                self.set_cursor_position(cursor_position)
+
+    def find_in_history(self, tocursor, start_idx, backward):
+        """Find text 'tocursor' in history, from index 'start_idx'"""
+        if start_idx is None:
+            start_idx = len(self.history)
+        # Finding text in history
+        step = -1 if backward else 1
+        idx = start_idx
+        if len(tocursor) == 0 or self.hist_wholeline:
+            idx += step
+            if idx >= len(self.history) or len(self.history) == 0:
+                return "", len(self.history)
+            elif idx < 0:
+                idx = 0
+            self.hist_wholeline = True
+            return self.history[idx], idx
+        else:
+            for index in range(len(self.history)):
+                idx = (start_idx+step*(index+1)) % len(self.history)
+                entry = self.history[idx]
+                if entry.startswith(tocursor):
+                    return entry[len(tocursor):], idx
+            else:
+                return None, start_idx
+
+    def reset_search_pos(self):
+        """Reset the position from which to search the history"""
+        self.histidx = None

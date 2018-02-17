@@ -27,12 +27,13 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
 OTHER DEALINGS IN THE SOFTWARE.
 """
 
-version_info = (3, 0, 0, "dev0")
+version_info = (4, 0, 0, "dev0")
 
 __version__ = '.'.join(map(str, version_info))
 __license__ = __doc__
 __project_url__ = 'https://github.com/spyder-ide/spyder'
 __forum_url__   = 'http://groups.google.com/group/spyderlib'
+__trouble_url__ = __project_url__ + '/wiki/Troubleshooting-Guide-and-FAQ'
 
 # Dear (Debian, RPM, ...) package makers, please feel free to customize the
 # following path to module's data (images) and translations:

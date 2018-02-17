@@ -15,16 +15,17 @@
 import os.path as osp
 
 # Third party imports
-from qtpy.QtCore import Qt, Signal, Slot
+from qtpy.QtCore import Qt, Slot
 from qtpy.QtWidgets import QGroupBox, QInputDialog, QLabel, QVBoxLayout
 
 # Local imports
 from spyder.config.base import get_translation
-from spyder.plugins import SpyderPluginMixin
-from spyder.plugins.configdialog import PluginConfigPage
+from spyder.api.plugins import SpyderPluginWidget
+from spyder.api.preferences import PluginConfigPage
 from spyder.utils import icon_manager as ima
-from spyder.utils.qthelpers import create_action
-from .widgets.pylintgui import (PYLINT_PATH, PylintWidget)
+from spyder.utils.programs import is_module_installed
+from spyder.utils.qthelpers import create_action, MENU_SEPARATOR
+from .widgets.pylintgui import PylintWidget
 
 
 _ = get_translation("pylint", "spyder_pylint")
@@ -78,16 +79,22 @@ class PylintConfigPage(PluginConfigPage):
         self.setLayout(vlayout)
 
 
-class Pylint(PylintWidget, SpyderPluginMixin):
-    """Python source code analysis based on pylint"""
+class Pylint(SpyderPluginWidget):
+    """Python source code analysis based on pylint."""
+
     CONF_SECTION = 'pylint'
     CONFIGWIDGET_CLASS = PylintConfigPage
-    edit_goto = Signal(str, int, str)
 
     def __init__(self, parent=None):
-        PylintWidget.__init__(self, parent=parent,
-                              max_entries=self.get_option('max_entries', 50))
-        SpyderPluginMixin.__init__(self, parent)
+        SpyderPluginWidget.__init__(self, parent)
+
+        max_entries = self.get_option('max_entries', 50)
+        self.pylint = PylintWidget(self, max_entries=max_entries,
+                                   options_button=self.options_button)
+
+        layout = QVBoxLayout()
+        layout.addWidget(self.pylint)
+        self.setLayout(layout)
         
         # Initialize plugin
         self.initialize_plugin()
@@ -107,7 +114,7 @@ class Pylint(PylintWidget, SpyderPluginMixin):
         Return the widget to give focus to when
         this plugin's dockwidget is raised on top-level
         """
-        return self.treewidget
+        return self.pylint.treewidget
     
     def get_plugin_actions(self):
         """Return a list of actions related to plugin"""
@@ -116,7 +123,7 @@ class Pylint(PylintWidget, SpyderPluginMixin):
                                        None, ima.icon('history'),
                                        _("Set history maximum entries"),
                                        triggered=self.change_history_depth)
-        self.treewidget.common_actions += (None, history_action)
+        self.pylint.treewidget.common_actions += (None, history_action)
         return []
 
     def on_first_registration(self):
@@ -126,22 +133,23 @@ class Pylint(PylintWidget, SpyderPluginMixin):
 
     def register_plugin(self):
         """Register plugin in Spyder's main window"""
-        self.edit_goto.connect(self.main.editor.load)
-        self.redirect_stdio.connect(self.main.redirect_internalshell_stdio)
+        self.pylint.treewidget.sig_edit_goto.connect(self.main.editor.load)
+        self.pylint.redirect_stdio.connect(
+            self.main.redirect_internalshell_stdio)
         self.main.add_dockwidget(self)
         
         pylint_act = create_action(self, _("Run static code analysis"),
                                    triggered=self.run_pylint)
-        pylint_act.setEnabled(PYLINT_PATH is not None)
+        pylint_act.setEnabled(is_module_installed('pylint'))
         self.register_shortcut(pylint_act, context="Pylint",
                                name="Run analysis")
         
-        self.main.source_menu_actions += [None, pylint_act]
+        self.main.source_menu_actions += [MENU_SEPARATOR, pylint_act]
         self.main.editor.pythonfile_dependent_actions += [pylint_act]
 
     def refresh_plugin(self):
         """Refresh pylint widget"""
-        self.remove_obsolete_items()
+        self.pylint.remove_obsolete_items()
         
     def closing_plugin(self, cancelable=False):
         """Perform actions before parent main window is closed"""
@@ -157,7 +165,7 @@ class Pylint(PylintWidget, SpyderPluginMixin):
     @Slot()
     def change_history_depth(self):
         "Change history max entries"""
-        depth, valid = QInputDialog.getInteger(self, _('History'),
+        depth, valid = QInputDialog.getInt(self, _('History'),
                                        _('Maximum entries'),
                                        self.get_option('max_entries'),
                                        10, 10000)
@@ -178,4 +186,4 @@ class Pylint(PylintWidget, SpyderPluginMixin):
             self.dockwidget.setVisible(True)
             self.dockwidget.setFocus()
             self.dockwidget.raise_()
-        PylintWidget.analyze(self, filename)
+        self.pylint.analyze(filename)

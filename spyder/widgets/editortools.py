@@ -13,7 +13,7 @@ import re
 
 # Third party imports
 from qtpy.compat import from_qvariant
-from qtpy.QtCore import Qt, Signal, Slot
+from qtpy.QtCore import QSize, Qt, Signal, Slot
 from qtpy.QtWidgets import QHBoxLayout, QTreeWidgetItem, QVBoxLayout, QWidget
 
 # Local imports
@@ -21,7 +21,7 @@ from spyder.config.base import _, STDOUT
 from spyder.py3compat import to_text_string
 from spyder.utils import icon_manager as ima
 from spyder.utils.qthelpers import (create_action, create_toolbutton,
-                                    set_item_user_text)
+                                    set_item_user_text, create_plugin_layout)
 from spyder.widgets.onecolumntree import OneColumnTree
 
 
@@ -179,11 +179,11 @@ def remove_from_tree_cache(tree_cache, line=None, item=None):
         #XXX: remove this debug-related fragment of code
         print("unable to remove tree item: ", debug, file=STDOUT)
 
+
 class OutlineExplorerTreeWidget(OneColumnTree):
-    def __init__(self, parent, show_fullpath=False, fullpath_sorting=True,
+    def __init__(self, parent, show_fullpath=False,
                  show_all_files=True, show_comments=True):
         self.show_fullpath = show_fullpath
-        self.fullpath_sorting = fullpath_sorting
         self.show_all_files = show_all_files
         self.show_comments = show_comments
         OneColumnTree.__init__(self, parent)
@@ -241,10 +241,6 @@ class OutlineExplorerTreeWidget(OneColumnTree):
     def toggle_show_comments(self, state):
         self.show_comments = state
         self.update_all()
-            
-    def set_fullpath_sorting(self, state):
-        self.fullpath_sorting = state
-        self.__sort_toplevel_items()
 
     @Slot()
     def go_to_cursor_position(self):
@@ -323,13 +319,14 @@ class OutlineExplorerTreeWidget(OneColumnTree):
                     pass
         
     def __sort_toplevel_items(self):
-        if self.fullpath_sorting:
-            sort_func = lambda item: osp.dirname(item.path.lower())
-        else:
-            sort_func = lambda item: osp.basename(item.path.lower())
+        sort_func = lambda item: osp.basename(item.path.lower())
         self.sort_top_level_items(key=sort_func)
             
     def populate_branch(self, editor, root_item, tree_cache=None):
+        """
+        Generates an outline of the editor's content and stores the result
+        in a cache.
+        """
         if tree_cache is None:
             tree_cache = {}
         
@@ -350,10 +347,7 @@ class OutlineExplorerTreeWidget(OneColumnTree):
         for block_nb in range(editor.get_line_count()):
             line_nb = block_nb+1
             data = oe_data.get(block_nb)
-            if data is None:
-                level = None
-            else:
-                level = data.fold_level
+            level = None if data is None else data.fold_level
             citem, clevel, _d = tree_cache.get(line_nb, (None, None, ""))
             
             # Skip iteration if line is not the first line of a foldable block
@@ -372,7 +366,13 @@ class OutlineExplorerTreeWidget(OneColumnTree):
                         if citem is not None:
                             remove_from_tree_cache(tree_cache, line=line_nb)
                         continue
-                
+
+            # Skip iteration for if/else/try/for/etc foldable blocks.
+            if not_class_nor_function and not data.is_comment():
+                if citem is not None:
+                    remove_from_tree_cache(tree_cache, line=line_nb)
+                continue
+
             if previous_level is not None:
                 if level == previous_level:
                     pass
@@ -390,8 +390,8 @@ class OutlineExplorerTreeWidget(OneColumnTree):
                 cname = to_text_string(citem.text(0))
                 
             preceding = root_item if previous_item is None else previous_item
-            if not_class_nor_function:
-                if data.is_comment() and not self.show_comments:
+            if not_class_nor_function and data.is_comment():
+                if not self.show_comments:
                     if citem is not None:
                         remove_from_tree_cache(tree_cache, line=line_nb)
                     continue
@@ -402,14 +402,10 @@ class OutlineExplorerTreeWidget(OneColumnTree):
                         continue
                     else:
                         remove_from_tree_cache(tree_cache, line=line_nb)
-                if data.is_comment():
-                    if data.def_type == data.CELL:
-                        item = CellItem(data.text, line_nb, parent, preceding)
-                    else:
-                        item = CommentItem(
-                            data.text, line_nb, parent, preceding)
+                if data.def_type == data.CELL:
+                    item = CellItem(data.text, line_nb, parent, preceding)
                 else:
-                    item = TreeItem(data.text, line_nb, parent, preceding)
+                    item = CommentItem(data.text, line_nb, parent, preceding)
             elif class_name is not None:
                 if citem is not None:
                     if class_name == cname and level == clevel:
@@ -476,7 +472,6 @@ class OutlineExplorerTreeWidget(OneColumnTree):
         parent = self.current_editor.parent()
         for editor_id, i_item in list(self.editor_items.items()):
             if i_item is root_item:
-                #XXX: not working anymore!!!
                 for editor, _id in list(self.editor_ids.items()):
                     if _id == editor_id and editor.parent() is parent:
                         self.current_editor = editor
@@ -494,15 +489,14 @@ class OutlineExplorerWidget(QWidget):
     """Class browser"""
     edit_goto = Signal(str, int, str)
     edit = Signal(str)
-    outlineexplorer_is_visible = Signal()
+    is_visible = Signal()
     
-    def __init__(self, parent=None, show_fullpath=True, fullpath_sorting=True,
-                 show_all_files=True, show_comments=True):
+    def __init__(self, parent=None, show_fullpath=True,
+                 show_all_files=True, show_comments=True, options_button=None):
         QWidget.__init__(self, parent)
 
         self.treewidget = OutlineExplorerTreeWidget(self,
                                             show_fullpath=show_fullpath,
-                                            fullpath_sorting=fullpath_sorting,
                                             show_all_files=show_all_files,
                                             show_comments=show_comments)
 
@@ -513,14 +507,15 @@ class OutlineExplorerWidget(QWidget):
         self.visibility_action.setChecked(True)
         
         btn_layout = QHBoxLayout()
-        btn_layout.setAlignment(Qt.AlignLeft)
         for btn in self.setup_buttons():
+            btn.setAutoRaise(True)
+            btn.setIconSize(QSize(16, 16))
             btn_layout.addWidget(btn)
+        if options_button:
+            btn_layout.addStretch()
+            btn_layout.addWidget(options_button, Qt.AlignRight)
 
-        layout = QVBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addLayout(btn_layout)
-        layout.addWidget(self.treewidget)
+        layout = create_plugin_layout(btn_layout, self.treewidget)
         self.setLayout(layout)
 
     @Slot(bool)
@@ -531,21 +526,25 @@ class OutlineExplorerWidget(QWidget):
             current_editor.clearFocus()
             current_editor.setFocus()
             if state:
-                self.outlineexplorer_is_visible.emit()
-        
+                self.is_visible.emit()
+
     def setup_buttons(self):
-        fromcursor_btn = create_toolbutton(self,
-                             icon=ima.icon('fromcursor'),
+        """Setup the buttons of the outline explorer widget toolbar."""
+        fromcursor_btn = create_toolbutton(
+                             self, icon=ima.icon('fromcursor'),
                              tip=_('Go to cursor position'),
                              triggered=self.treewidget.go_to_cursor_position)
-        collapse_btn = create_toolbutton(self)
-        collapse_btn.setDefaultAction(self.treewidget.collapse_selection_action)
-        expand_btn = create_toolbutton(self)
-        expand_btn.setDefaultAction(self.treewidget.expand_selection_action)
-        restore_btn = create_toolbutton(self)
-        restore_btn.setDefaultAction(self.treewidget.restore_action)
-        return (fromcursor_btn, collapse_btn, expand_btn, restore_btn)
-        
+
+        buttons = [fromcursor_btn]
+        for action in [self.treewidget.collapse_all_action,
+                       self.treewidget.expand_all_action,
+                       self.treewidget.restore_action,
+                       self.treewidget.collapse_selection_action,
+                       self.treewidget.expand_selection_action]:
+            buttons.append(create_toolbutton(self))
+            buttons[-1].setDefaultAction(action)
+        return buttons
+
     def set_current_editor(self, editor, fname, update, clear):
         if clear:
             self.remove_editor(editor)
@@ -558,7 +557,6 @@ class OutlineExplorerWidget(QWidget):
     def get_options(self):
         """
         Return outline explorer options
-        except for fullpath sorting option which is more global
         """
         return dict(show_fullpath=self.treewidget.show_fullpath,
                     show_all_files=self.treewidget.show_all_files,
@@ -569,9 +567,6 @@ class OutlineExplorerWidget(QWidget):
     
     def update(self):
         self.treewidget.update_all()
-
-    def set_fullpath_sorting(self, state):
-        self.treewidget.set_fullpath_sorting(state)
 
     def file_renamed(self, editor, new_filename):
         self.treewidget.file_renamed(editor, new_filename)

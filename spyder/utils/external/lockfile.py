@@ -6,16 +6,21 @@
 """
 Filesystem-based interprocess mutex.
 
-Changes by the Spyder Team to the original Twisted file:
--. Rewrite kill Windows function to make it more reliable
+Taken from the Twisted project.
+Distributed under the MIT license.
+
+Changes by the Spyder Team to the original module:
+  * Rewrite kill Windows function to make it more reliable.
+  * Detect if the process that owns the lock is an Spyder one.
 """
 
 __metaclass__ = type
 
 import errno, os
-
 from time import time as _uniquefloat
 
+import psutil
+from spyder.config.base import PYTEST
 from spyder.py3compat import PY2, to_binary_string
 
 def unique():
@@ -83,8 +88,11 @@ else:
         try:
             rename(newlinkname, filename)
         except:
-            os.remove(newvalname)
-            os.rmdir(newlinkname)
+            try:
+                os.remove(newvalname)
+                os.rmdir(newlinkname)
+            except (IOError, OSError):
+                pass
             raise
 
     def readlink(filename):   #analysis:ignore
@@ -171,10 +179,25 @@ class FilesystemLock:
                     try:
                         if kill is not None:
                             kill(int(pid), 0)
+                        # Verify that the running process corresponds to
+                        # a Spyder one
+                        p = psutil.Process(int(pid))
+
+                        # Valid names for main script
+                        names = set(['spyder', 'spyder3', 'bootstrap.py'])
+                        if PYTEST:
+                            names.add('runtests.py')
+
+                        # Check the first three command line arguments
+                        arguments = set(os.path.basename(arg)
+                                        for arg in p.cmdline()[:3])
+                        conditions = [names & arguments]
+                        if not any(conditions):
+                            raise(OSError(errno.ESRCH, 'No such process'))
                     except OSError as e:
                         if e.errno == errno.ESRCH:
-                            # The owner has vanished, try to claim it in the next
-                            # iteration through the loop.
+                            # The owner has vanished, try to claim it in the
+                            # next iteration through the loop.
                             try:
                                 rmlink(self.name)
                             except OSError as e:
